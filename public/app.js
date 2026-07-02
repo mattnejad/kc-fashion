@@ -28,6 +28,7 @@
   });
 
   const LEGACY_DB_KEY = "kinsey_cathers_fashion_v1"; // pre-cloud localStorage data
+  const ALLOWED_EMAIL = "kinseycathers@gmail.com"; // only this account may use the app
 
   const defaultSettings = () => ({
     commissionRate: "", // percent, kept as string; details TBD
@@ -1348,6 +1349,18 @@
 
   auth.onAuthStateChanged(async (user) => {
     if (user) {
+      // Private app: only Kinsey's account is allowed. Anyone else is
+      // signed straight back out (the server rules also block their data).
+      if ((user.email || "").toLowerCase() !== ALLOWED_EMAIL) {
+        await auth.signOut();
+        show("splash", false);
+        show("app", false);
+        show("auth-screen", true);
+        const box = $("#auth-error");
+        box.textContent = "This app is private. Please sign in with the Kinsey Cathers account.";
+        box.style.display = "";
+        return;
+      }
       userId = user.uid;
       show("splash", false);
       show("auth-screen", false);
