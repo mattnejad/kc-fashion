@@ -11,9 +11,10 @@
   /* ---------- Firebase setup ---------- */
   const firebaseConfig = {
     apiKey: "AIzaSyCVp0D1jYR_brsGR2_aoBE6bLb2IVSz_Os",
-    // authDomain matches the hosting domain so sign-in redirects are
-    // same-origin (required for reliable auth on iOS Safari/PWA).
-    authDomain: "kc-fashion-511b7.web.app",
+    // Use the .firebaseapp.com domain: its /__/auth/handler redirect URI is
+    // pre-authorized on the auto-created OAuth client, and serving the app from
+    // the same domain keeps sign-in same-origin (reliable on iOS Safari/PWA).
+    authDomain: "kc-fashion-511b7.firebaseapp.com",
     projectId: "kc-fashion-511b7",
     storageBucket: "kc-fashion-511b7.firebasestorage.app",
     messagingSenderId: "468203753796",

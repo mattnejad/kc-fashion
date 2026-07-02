@@ -3,7 +3,7 @@
 A private, cloud-synced web app for tracking sales associate contacts, purchases
 awaiting reimbursement, hours worked, and compensation.
 
-**Live app:** https://kc-fashion-511b7.web.app
+**Live app:** https://kc-fashion-511b7.firebaseapp.com
 
 ## What it does
 
@@ -45,7 +45,7 @@ awaiting reimbursement, hours worked, and compensation.
 
 ## Using it on a phone
 
-1. Open https://kc-fashion-511b7.web.app in Safari
+1. Open https://kc-fashion-511b7.firebaseapp.com in Safari
 2. Sign in with Google (one time per device)
 3. Tap **Share → Add to Home Screen** for a full-screen app icon
 
