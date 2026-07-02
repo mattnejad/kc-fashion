@@ -1,52 +1,64 @@
 /* ============================================================
    Kinsey Cathers Fashion
-   A local-first client/purchase/hours tracker.
-   Data is stored in the browser (localStorage). Export a backup
-   from the menu (top-right) to keep a copy or move devices.
+   Cloud-synced client/purchase/hours tracker.
+   Data lives in Firestore, private to the signed-in user, with
+   full offline support (reads/writes queue and sync on reconnect).
    ============================================================ */
 
 (function () {
   "use strict";
 
-  /* ---------- Storage layer ---------- */
-  const DB_KEY = "kinsey_cathers_fashion_v1";
+  /* ---------- Firebase setup ---------- */
+  const firebaseConfig = {
+    apiKey: "AIzaSyCVp0D1jYR_brsGR2_aoBE6bLb2IVSz_Os",
+    // authDomain matches the hosting domain so sign-in redirects are
+    // same-origin (required for reliable auth on iOS Safari/PWA).
+    authDomain: "kc-fashion-511b7.web.app",
+    projectId: "kc-fashion-511b7",
+    storageBucket: "kc-fashion-511b7.firebasestorage.app",
+    messagingSenderId: "468203753796",
+    appId: "1:468203753796:web:d878f4f7dd142ad0494711",
+  };
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const firestore = firebase.firestore();
+  // Offline persistence: cache all data on-device; writes queue offline.
+  firestore.enablePersistence({ synchronizeTabs: true }).catch((e) => {
+    console.warn("Offline persistence unavailable", e && e.code);
+  });
+
+  const LEGACY_DB_KEY = "kinsey_cathers_fashion_v1"; // pre-cloud localStorage data
+
+  const defaultSettings = () => ({
+    commissionRate: "", // percent, kept as string; details TBD
+    hourlyWage: "", // dollars per hour, kept as string
+    stores: ["Chanel", "Louis Vuitton", "Hermès", "Gucci", "Dior", "Saint Laurent", "Bottega Veneta"],
+    paymentMethods: [], // [{id, name, cashbackPercent}]
+  });
 
   const defaultData = () => ({
     contacts: [],
     purchases: [],
     hours: [],
-    settings: {
-      commissionRate: "", // percent, kept as string; details TBD
-      hourlyWage: "", // dollars per hour, kept as string
-      stores: ["Chanel", "Louis Vuitton", "Hermès", "Gucci", "Dior", "Saint Laurent", "Bottega Veneta"],
-      paymentMethods: [], // [{id, name, cashbackPercent}]
-    },
+    settings: defaultSettings(),
   });
 
-  function load() {
-    try {
-      const raw = localStorage.getItem(DB_KEY);
-      if (!raw) return defaultData();
-      const parsed = JSON.parse(raw);
-      const merged = Object.assign(defaultData(), parsed);
-      merged.settings = Object.assign(defaultData().settings, parsed.settings || {});
-      return merged;
-    } catch (e) {
-      console.error("Failed to load data", e);
-      return defaultData();
-    }
-  }
+  // In-memory mirror of the user's Firestore data; render code reads this.
+  let db = defaultData();
+  let userId = null; // signed-in Firebase uid
+  let unsubscribers = [];
 
+  const userDoc = () => firestore.collection("users").doc(userId);
+  const col = (name) => userDoc().collection(name);
+  const settingsRef = () => userDoc().collection("meta").doc("settings");
+
+  // Persist the settings object (collections persist per-record in upsert/remove).
   function save() {
-    try {
-      localStorage.setItem(DB_KEY, JSON.stringify(db));
-    } catch (e) {
-      console.error("Failed to save data", e);
-      toast("Storage is full — export a backup, then remove some old photos.");
-    }
+    if (!userId) return;
+    settingsRef()
+      .set(JSON.parse(JSON.stringify(db.settings)))
+      .catch((e) => console.error("Settings sync error", e));
   }
-
-  let db = load();
 
   /* ---------- Helpers ---------- */
   const uid = () =>
@@ -602,7 +614,7 @@
       card.querySelector('[data-act="toggle"]')?.addEventListener("click", () => {
         p.reimbursed = !p.reimbursed;
         p.reimbursedDate = p.reimbursed ? todayISO() : "";
-        save();
+        upsert("purchases", p);
         toast(p.reimbursed ? "Marked reimbursed" : "Moved back to awaiting");
         renderPurchases();
       });
@@ -832,7 +844,7 @@
       card.querySelector('[data-act="toggle"]')?.addEventListener("click", () => {
         h.reimbursed = !h.reimbursed;
         h.reimbursedDate = h.reimbursed ? todayISO() : "";
-        save();
+        upsert("hours", h);
         toast(h.reimbursed ? "Marked paid" : "Moved back to unpaid");
         renderHours();
       });
@@ -890,11 +902,22 @@
     const arr = db[coll];
     const i = arr.findIndex((x) => x.id === rec.id);
     if (i >= 0) arr[i] = rec; else arr.push(rec);
-    save();
+    if (!userId) return;
+    col(coll)
+      .doc(rec.id)
+      .set(JSON.parse(JSON.stringify(rec)))
+      .catch((e) => {
+        console.error("Sync error", e);
+        toast("Couldn't sync that change — check your connection.");
+      });
   }
   function remove(coll, id) {
     db[coll] = db[coll].filter((x) => x.id !== id);
-    save();
+    if (!userId) return;
+    col(coll)
+      .doc(id)
+      .delete()
+      .catch((e) => console.error("Sync error", e));
   }
 
   /* ============================================================
@@ -1106,14 +1129,17 @@
      Menu — backup / restore
      ============================================================ */
   function openMenu() {
-    openModal("Backup & data", `
-      <p class="hint">Your data lives on this device only. Export a backup file to
-      keep it safe or move it to another device.</p>
+    const email = auth.currentUser ? auth.currentUser.email : "";
+    openModal("Account & data", `
+      <p class="hint">Signed in as <strong>${esc(email)}</strong>. Your data is private
+      to this account, stored securely in the cloud, and syncs across your devices.
+      It also works offline and catches up when you reconnect.</p>
       <div class="modal-actions" style="flex-direction:column; gap:10px;">
         <button type="button" class="btn btn-ghost" id="m-stores">Manage stores</button>
         <button type="button" class="btn btn-ghost" id="m-payments">Manage payment methods</button>
         <button type="button" class="btn btn-primary" id="m-export">Export backup (.json)</button>
         <button type="button" class="btn btn-ghost" id="m-import">Import backup</button>
+        <button type="button" class="btn btn-ghost" id="m-signout" style="color:var(--danger);">Sign out</button>
       </div>
       <input id="m-file" type="file" accept="application/json,.json" hidden />
       <p class="hint" style="margin-top:16px;">
@@ -1136,6 +1162,12 @@
     $("#m-export", root).addEventListener("click", exportData);
     $("#m-import", root).addEventListener("click", () => $("#m-file", root).click());
     $("#m-file", root).addEventListener("change", (e) => importData(e.target.files[0], close));
+    $("#m-signout", root).addEventListener("click", () => {
+      if (confirm("Sign out? Your data stays safely in your account.")) {
+        close();
+        auth.signOut();
+      }
+    });
   }
 
   function exportData() {
@@ -1152,20 +1184,35 @@
   function importData(file, done) {
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(reader.result);
         if (!parsed || !Array.isArray(parsed.contacts))
           throw new Error("Not a valid backup file");
         if (!confirm("This will replace all current data with the backup. Continue?")) return;
-        db = Object.assign(defaultData(), parsed);
-        db.settings = Object.assign(defaultData().settings, parsed.settings || {});
+        toast("Importing…");
+        // Remove docs not present in the backup, then write everything.
+        const incoming = Object.assign(defaultData(), parsed);
+        incoming.settings = Object.assign(defaultSettings(), parsed.settings || {});
+        for (const name of ["contacts", "purchases", "hours"]) {
+          const incomingIds = new Set((incoming[name] || []).map((r) => r.id));
+          const existing = await col(name).get();
+          await Promise.all(
+            existing.docs.filter((d) => !incomingIds.has(d.id)).map((d) => d.ref.delete())
+          );
+          await Promise.all(
+            (incoming[name] || []).map((r) =>
+              col(name).doc(r.id).set(JSON.parse(JSON.stringify(r)))
+            )
+          );
+        }
+        db = incoming;
         save();
         done && done();
         route(currentTab);
         toast("Backup imported");
       } catch (err) {
-        toast("Couldn't read that file");
+        toast("Couldn't import that file");
         console.error(err);
       }
     };
@@ -1204,6 +1251,82 @@
     else if (currentTab === "hours") openHoursForm();
   }
 
+  /* ============================================================
+     Cloud sync — listeners, migration, auth boot
+     ============================================================ */
+  let renderTimer = null;
+  function scheduleRender() {
+    // Debounce: multiple snapshots can land at once (initial load).
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => route(currentTab), 40);
+  }
+
+  function updateSyncDot(fromCache, hasPending) {
+    const dot = $("#sync-dot");
+    if (!dot) return;
+    const pending = fromCache || hasPending;
+    dot.classList.toggle("pending", pending);
+    dot.title = pending ? "Waiting to sync (offline changes are saved)" : "Synced";
+  }
+
+  function attachListeners() {
+    unsubscribers.push(
+      settingsRef().onSnapshot((snap) => {
+        if (snap.exists) {
+          db.settings = Object.assign(defaultSettings(), snap.data());
+        }
+        scheduleRender();
+      })
+    );
+    ["contacts", "purchases", "hours"].forEach((name) => {
+      unsubscribers.push(
+        col(name).onSnapshot({ includeMetadataChanges: true }, (snap) => {
+          db[name] = snap.docs.map((d) => d.data());
+          updateSyncDot(snap.metadata.fromCache, snap.metadata.hasPendingWrites);
+          scheduleRender();
+        })
+      );
+    });
+  }
+
+  function detachListeners() {
+    unsubscribers.forEach((u) => u());
+    unsubscribers = [];
+  }
+
+  // One-time: move pre-cloud localStorage data into the user's empty account.
+  async function migrateLocalIfNeeded() {
+    try {
+      const raw = localStorage.getItem(LEGACY_DB_KEY);
+      if (!raw) return;
+      const old = JSON.parse(raw);
+      const probes = await Promise.all(
+        ["contacts", "purchases", "hours"].map((n) => col(n).limit(1).get())
+      );
+      if (probes.some((p) => !p.empty)) return; // account already has data
+      const writes = [];
+      for (const name of ["contacts", "purchases", "hours"]) {
+        (old[name] || []).forEach((r) => {
+          if (r && r.id) writes.push(col(name).doc(r.id).set(JSON.parse(JSON.stringify(r))));
+        });
+      }
+      writes.push(
+        settingsRef().set(Object.assign(defaultSettings(), old.settings || {}))
+      );
+      await Promise.all(writes);
+      // Keep a safety copy locally, then retire the old key.
+      localStorage.setItem(LEGACY_DB_KEY + "_migrated", raw);
+      localStorage.removeItem(LEGACY_DB_KEY);
+      toast("Moved your existing data into your account");
+    } catch (e) {
+      console.error("Migration failed", e);
+    }
+  }
+
+  function show(el, visible) {
+    document.getElementById(el).style.display = visible ? "" : "none";
+  }
+
   /* ---------- Wire up ---------- */
   document.querySelectorAll(".tab").forEach((t) =>
     t.addEventListener("click", () => route(t.dataset.tab))
@@ -1211,5 +1334,40 @@
   $("#fab").addEventListener("click", fabAction);
   $("#btn-menu").addEventListener("click", openMenu);
 
-  route("dashboard");
+  $("#btn-signin").addEventListener("click", () => {
+    const provider = new firebase.auth.GoogleAuthProvider();
+    auth.signInWithRedirect(provider);
+  });
+
+  auth.getRedirectResult().catch((err) => {
+    console.error("Sign-in error", err);
+    const box = $("#auth-error");
+    box.textContent = "Sign-in didn't complete — please try again.";
+    box.style.display = "";
+  });
+
+  auth.onAuthStateChanged(async (user) => {
+    if (user) {
+      userId = user.uid;
+      show("splash", false);
+      show("auth-screen", false);
+      show("app", true);
+      await migrateLocalIfNeeded();
+      detachListeners();
+      attachListeners();
+      route(currentTab);
+    } else {
+      userId = null;
+      db = defaultData();
+      detachListeners();
+      show("splash", false);
+      show("app", false);
+      show("auth-screen", true);
+    }
+  });
+
+  // Offline-capable app shell
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
 })();

@@ -1,7 +1,9 @@
 # Kinsey Cathers Fashion
 
-A private, local web app for tracking sales associate contacts, purchases
-awaiting reimbursement, and hours worked. Built to run on a laptop or phone browser.
+A private, cloud-synced web app for tracking sales associate contacts, purchases
+awaiting reimbursement, hours worked, and compensation.
+
+**Live app:** https://kc-fashion-511b7.web.app
 
 ## What it does
 
@@ -21,45 +23,43 @@ awaiting reimbursement, and hours worked. Built to run on a laptop or phone brow
 - **Hours** — log hours + notes and mark them reimbursed when paid.
 - **Stores & payment methods** — managed lists (☰ menu → Manage stores / Manage
   payment methods) so those fields stay picklists instead of free text; you can
-  also add a new one on the fly from within the Contact/Purchase forms.
+  also add a new one on the fly from within the forms.
 
-## How to run it
+## Architecture
 
-It's just static files — no install needed.
+- **Frontend:** static HTML/CSS/JS in `public/`, no build step.
+- **Auth:** Firebase Authentication, Google sign-in only. The `authDomain` is set
+  to the hosting domain (`kc-fashion-511b7.web.app`) so the redirect sign-in flow
+  is same-origin — required for reliable auth on iOS Safari / home-screen PWAs.
+- **Data:** Cloud Firestore, one subtree per user:
+  - `users/{uid}/meta/settings` — settings (stores, payment methods, rates)
+  - `users/{uid}/contacts/{id}` · `users/{uid}/purchases/{id}` · `users/{uid}/hours/{id}`
+  - Security rules (`firestore.rules`): each user can only read/write their own
+    subtree. Photos are stored as compressed base64 JPEGs inside purchase docs.
+- **Offline:** Firestore IndexedDB persistence (data reads/writes work offline and
+  sync on reconnect) plus a service worker (`public/sw.js`) that caches the app
+  shell so the app opens with no connection.
+- **Hosting:** Firebase Hosting (`firebase deploy --only hosting`).
+- **Migration:** on first sign-in, any data from the old localStorage-only version
+  is automatically moved into the user's cloud account.
 
-**Easiest:** double-click `index.html` to open it in your browser.
+## Using it on a phone
 
-**On your phone (recommended for real use):** run a tiny local server so the phone
-can reach it over Wi-Fi, or later deploy it (see below). From this folder:
+1. Open https://kc-fashion-511b7.web.app in Safari
+2. Sign in with Google (one time per device)
+3. Tap **Share → Add to Home Screen** for a full-screen app icon
+
+## Deploying updates
 
 ```bash
-python3 -m http.server 8000
+firebase deploy --only hosting            # app changes
+firebase deploy --only firestore:rules    # security rule changes
 ```
 
-Then open `http://localhost:8000` on the computer, or
-`http://<computer-ip>:8000` on a phone on the same Wi-Fi.
+The Firebase project is `kc-fashion-511b7` (owner: kinseycathers@gmail.com).
 
-On iPhone Safari you can tap **Share → Add to Home Screen** to get an app icon.
+## Backups
 
-## Your data
-
-Data is stored **on the device**, in the browser (localStorage). It is private and
-never leaves the device. Because of that:
-
-- Use the **☰ menu (top-right) → Export backup** regularly to save a `.json` copy.
-- Use **Import backup** to restore or move data to another device.
-- Photos are compressed automatically when added, but localStorage still has a
-  size ceiling (typically a few MB). If storage ever fills up you'll get a
-  warning — export a backup and remove a few older photos to free up space.
-
-## Coming later (not in v1)
-
-- Cloud sync / login so the same data shows up on every device.
-- Commission calculation once the rules are known (there's a placeholder rate now).
-- Texting multiple sales associates a photo to source a product.
-
-## Files
-
-- `index.html` — page shell + navigation
-- `styles.css` — styling
-- `app.js` — all app logic and storage
+Data lives in the user's private Firestore account, but the ☰ menu still offers
+**Export backup** (downloads all data as `.json`) and **Import backup** (replaces
+account data with a backup file).
