@@ -142,7 +142,7 @@
   let currentTab = "dashboard";
   const ui = {
     contacts: { q: "", sort: "name" },
-    purchases: { filter: "outstanding" },
+    purchases: { filter: "outstanding", q: "", sort: "recent" },
     hours: { filter: "outstanding" },
   };
 
@@ -544,14 +544,43 @@
   /* ============================================================
      PURCHASES
      ============================================================ */
-  function renderPurchases() {
-    const filter = ui.purchases.filter;
-    let list = db.purchases.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt||0)-(a.createdAt||0));
+  function filterPurchases() {
+    const { filter, q, sort } = ui.purchases;
+    let list = db.purchases.slice();
+
     if (filter === "outstanding") list = list.filter((p) => !p.reimbursed);
     if (filter === "reimbursed") list = list.filter((p) => p.reimbursed);
 
+    if (q.trim()) {
+      const needle = q.toLowerCase();
+      list = list.filter((p) => {
+        const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
+        return [p.product, p.store, p.paymentMethod, p.notes, contact ? contact.name : ""]
+          .filter(Boolean).join(" ").toLowerCase().includes(needle);
+      });
+    }
+
+    list.sort((a, b) => {
+      if (sort === "product") return (a.product || "").localeCompare(b.product || "");
+      if (sort === "cost-high") return (Number(b.cost) || 0) - (Number(a.cost) || 0);
+      if (sort === "cost-low") return (Number(a.cost) || 0) - (Number(b.cost) || 0);
+      if (sort === "oldest") return (a.date || "").localeCompare(b.date || "") || (a.createdAt||0)-(b.createdAt||0);
+      // recent (default)
+      return (b.date || "").localeCompare(a.date || "") || (b.createdAt||0)-(a.createdAt||0);
+    });
+    return list;
+  }
+
+  function renderPurchases() {
+    const { filter, q, sort } = ui.purchases;
+    const list = filterPurchases();
+
     const owed = db.purchases.filter((p) => !p.reimbursed)
       .reduce((s, p) => s + (Number(p.cost) || 0), 0);
+
+    const listEmpty = () => q.trim()
+      ? emptyState("&#128717;", "No matches.")
+      : emptyState("&#128717;", filter==="outstanding" ? "Nothing outstanding — all caught up." : "No purchases here yet.");
 
     viewEl.innerHTML = `
       <h2 class="view-title">Purchases</h2>
@@ -559,17 +588,41 @@
         <div class="stat-label">Currently awaiting reimbursement</div>
         <div class="stat-value amber">${money(owed)}</div>
       </div>
+      <div class="toolbar">
+        <div class="search">
+          <span>&#9906;</span>
+          <input id="purchase-search" type="search" placeholder="Search product, store, associate…"
+            value="${esc(q)}" />
+        </div>
+        <select id="purchase-sort" class="select" aria-label="Sort">
+          <option value="recent" ${sort==="recent"?"selected":""}>Newest</option>
+          <option value="oldest" ${sort==="oldest"?"selected":""}>Oldest</option>
+          <option value="product" ${sort==="product"?"selected":""}>Product</option>
+          <option value="cost-high" ${sort==="cost-high"?"selected":""}>Cost: high</option>
+          <option value="cost-low" ${sort==="cost-low"?"selected":""}>Cost: low</option>
+        </select>
+      </div>
       <div class="segment">
         <button data-f="outstanding" class="${filter==="outstanding"?"active":""}">Awaiting</button>
         <button data-f="reimbursed" class="${filter==="reimbursed"?"active":""}">Reimbursed</button>
         <button data-f="all" class="${filter==="all"?"active":""}">All</button>
       </div>
       <div id="purchase-list">
-        ${list.length ? list.map(purchaseCard).join("")
-          : emptyState("&#128717;", filter==="outstanding" ? "Nothing outstanding — all caught up." : "No purchases here yet.")}
+        ${list.length ? list.map(purchaseCard).join("") : listEmpty()}
       </div>
     `;
 
+    const search = $("#purchase-search");
+    search.addEventListener("input", () => {
+      ui.purchases.q = search.value;
+      const filtered = filterPurchases();
+      $("#purchase-list").innerHTML = filtered.length ? filtered.map(purchaseCard).join("") : listEmpty();
+      bindPurchaseCards();
+    });
+    $("#purchase-sort").addEventListener("change", (e) => {
+      ui.purchases.sort = e.target.value;
+      renderPurchases();
+    });
     viewEl.querySelectorAll(".segment button").forEach((b) =>
       b.addEventListener("click", () => { ui.purchases.filter = b.dataset.f; renderPurchases(); })
     );
@@ -581,7 +634,7 @@
     const sub = [fmtDate(p.date), contact ? contact.name : null].filter(Boolean).join(" · ");
     const cashbackAmt = (Number(p.cost) || 0) * ((Number(p.cashbackPercent) || 0) / 100);
     return `
-      <div class="card" data-id="${p.id}">
+      <div class="card card-clickable" data-id="${p.id}">
         <div class="card-row">
           ${p.photo ? `<img class="thumb" src="${esc(p.photo)}" alt="${esc(p.product)}" />` : ""}
           <div class="card-main">
@@ -609,9 +662,14 @@
   }
 
   function bindPurchaseCards() {
-    viewEl.querySelectorAll(".card").forEach((card) => {
+    viewEl.querySelectorAll(".card[data-id]").forEach((card) => {
       const id = card.dataset.id;
       const p = db.purchases.find((x) => x.id === id);
+      if (!p) return;
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".mini-btn")) return;
+        openPurchaseView(p);
+      });
       card.querySelector('[data-act="edit"]')?.addEventListener("click", () => openPurchaseForm(p));
       card.querySelector('[data-act="toggle"]')?.addEventListener("click", () => {
         p.reimbursed = !p.reimbursed;
@@ -620,6 +678,55 @@
         toast(p.reimbursed ? "Marked reimbursed" : "Moved back to awaiting");
         renderPurchases();
       });
+    });
+  }
+
+  function openPurchaseView(p) {
+    const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
+    const cashbackAmt = (Number(p.cost) || 0) * ((Number(p.cashbackPercent) || 0) / 100);
+    const meta = [fmtDate(p.date), contact ? contact.name : null].filter(Boolean).join(" · ");
+
+    const root = $("#modal-root");
+    root.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-grip"></div>
+          ${p.photo ? `<img class="view-photo" src="${esc(p.photo)}" alt="${esc(p.product)}" />` : ""}
+          <h2>${esc(p.product)}</h2>
+          <div class="amount big" style="margin-bottom:10px;">${money(p.cost)}</div>
+          <div class="card-sub" style="margin-bottom:12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+            ${p.store ? `<span class="chip">${esc(p.store)}</span>` : ""}
+            ${meta ? `<span>${esc(meta)}</span>` : ""}
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
+            ${p.reimbursed
+              ? `<span class="chip green">Reimbursed${p.reimbursedDate ? " · " + esc(fmtDate(p.reimbursedDate)) : ""}</span>`
+              : `<span class="chip amber">Awaiting reimbursement</span>`}
+            ${p.paymentMethod ? `<span class="chip">${esc(p.paymentMethod)}</span>` : ""}
+            ${cashbackAmt > 0 ? `<span class="chip green">+${money(cashbackAmt)} cashback</span>` : ""}
+          </div>
+          ${p.notes ? `<div class="card-notes" style="margin-bottom:6px;">${esc(p.notes)}</div>` : ""}
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="view-close">Close</button>
+            <button type="button" class="btn btn-ghost" id="view-toggle">${p.reimbursed ? "Mark unpaid" : "Mark paid"}</button>
+            <button type="button" class="btn btn-primary" id="view-edit">Edit</button>
+          </div>
+        </div>
+      </div>`;
+
+    const close = () => (root.innerHTML = "");
+    $(".modal-backdrop", root).addEventListener("click", (e) => {
+      if (e.target.classList.contains("modal-backdrop")) close();
+    });
+    $("#view-close", root).addEventListener("click", close);
+    $("#view-edit", root).addEventListener("click", () => { close(); openPurchaseForm(p); });
+    $("#view-toggle", root).addEventListener("click", () => {
+      p.reimbursed = !p.reimbursed;
+      p.reimbursedDate = p.reimbursed ? todayISO() : "";
+      upsert("purchases", p);
+      toast(p.reimbursed ? "Marked reimbursed" : "Moved back to awaiting");
+      close();
+      renderPurchases();
     });
   }
 
