@@ -681,6 +681,49 @@
     });
   }
 
+  // Full-screen photo viewer (lightbox). Supports the phone's back gesture:
+  // opening pushes a history entry, so a back-swipe closes the photo instead
+  // of leaving the app. A visible Back button and backdrop tap also close it.
+  function openPhotoViewer(dataUrl) {
+    if (!dataUrl) return;
+    const overlay = document.createElement("div");
+    overlay.className = "photo-viewer";
+    overlay.innerHTML = `
+      <button type="button" class="photo-viewer-back" aria-label="Back">&#8592; Back</button>
+      <img class="photo-viewer-img" src="${esc(dataUrl)}" alt="" />
+    `;
+    document.body.appendChild(overlay);
+    document.body.classList.add("no-scroll");
+
+    let done = false;
+    let pushed = false;
+
+    function teardown() {
+      if (done) return;
+      done = true;
+      overlay.remove();
+      document.body.classList.remove("no-scroll");
+      window.removeEventListener("popstate", onPop);
+    }
+    // Browser / OS back button pressed while the viewer is open.
+    function onPop() { teardown(); }
+    // Back button or backdrop tap: unwind the history entry we added.
+    function closeAndUnwind() {
+      if (done) return;
+      window.removeEventListener("popstate", onPop);
+      teardown();
+      if (pushed) history.back();
+    }
+
+    try { history.pushState({ kcPhotoViewer: true }, ""); pushed = true; } catch (e) { /* ignore */ }
+    window.addEventListener("popstate", onPop);
+
+    overlay.querySelector(".photo-viewer-back").addEventListener("click", closeAndUnwind);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeAndUnwind(); // tap outside the image
+    });
+  }
+
   function openPurchaseView(p) {
     const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
     const cashbackAmt = (Number(p.cost) || 0) * ((Number(p.cashbackPercent) || 0) / 100);
@@ -691,7 +734,10 @@
       <div class="modal-backdrop">
         <div class="modal" role="dialog" aria-modal="true">
           <div class="modal-grip"></div>
-          ${p.photo ? `<img class="view-photo" src="${esc(p.photo)}" alt="${esc(p.product)}" />` : ""}
+          ${p.photo ? `<button type="button" class="view-photo-wrap" id="view-photo-btn" aria-label="View photo full screen">
+            <img class="view-photo" src="${esc(p.photo)}" alt="${esc(p.product)}" />
+            <span class="view-photo-zoom" aria-hidden="true">&#10530;</span>
+          </button>` : ""}
           <h2>${esc(p.product)}</h2>
           <div class="amount big" style="margin-bottom:10px;">${money(p.cost)}</div>
           <div class="card-sub" style="margin-bottom:12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
@@ -718,6 +764,7 @@
     $(".modal-backdrop", root).addEventListener("click", (e) => {
       if (e.target.classList.contains("modal-backdrop")) close();
     });
+    $("#view-photo-btn", root)?.addEventListener("click", () => openPhotoViewer(p.photo));
     $("#view-close", root).addEventListener("click", close);
     $("#view-edit", root).addEventListener("click", () => { close(); openPurchaseForm(p); });
     $("#view-toggle", root).addEventListener("click", () => {
