@@ -22,13 +22,15 @@ awaiting reimbursement, hours worked, and compensation.
   associate's purchase history. Tap a purchase to see its full detail, tap its
   photo or receipt to view full screen. Search and sort the list.
 - **Statement** — "Generate statement" on the Purchases tab builds a printable
-  statement (date, product description, amount, grand total). Defaults to all
-  items awaiting reimbursement; can also be scoped to a month or hand-picked.
+  statement (date, product, brand, amount, grand total). Defaults to all items
+  awaiting reimbursement; can also be scoped to a month or hand-picked.
   Optionally attaches each item's receipt and flags any item missing one.
+  The statement deliberately discloses only the brand — never the store or the
+  sales associate, which stay internal to the app.
 - **Hours** — log hours + notes and mark them reimbursed when paid.
-- **Stores & payment methods** — managed lists (☰ menu → Manage stores / Manage
-  payment methods) so those fields stay picklists instead of free text; you can
-  also add a new one on the fly from within the forms.
+- **Stores, brands & payment methods** — managed lists (☰ menu → Manage stores /
+  Manage brands / Manage payment methods) so those fields stay picklists instead
+  of free text; you can also add a new one on the fly from within the forms.
 
 ## Architecture
 

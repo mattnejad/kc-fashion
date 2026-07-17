@@ -35,6 +35,7 @@
     commissionRate: "", // percent, kept as string; details TBD
     hourlyWage: "", // dollars per hour, kept as string
     stores: ["Chanel", "Louis Vuitton", "Hermès", "Gucci", "Dior", "Saint Laurent", "Bottega Veneta"],
+    brands: ["Chanel", "Louis Vuitton", "Hermès", "Gucci", "Dior", "Saint Laurent", "Bottega Veneta", "Prada", "Celine", "Loro Piana"],
     paymentMethods: [], // [{id, name, cashbackPercent}]
   });
 
@@ -571,7 +572,7 @@
       const needle = q.toLowerCase();
       list = list.filter((p) => {
         const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
-        return [p.product, p.store, p.paymentMethod, p.notes, contact ? contact.name : ""]
+        return [p.product, p.brand, p.store, p.paymentMethod, p.notes, contact ? contact.name : ""]
           .filter(Boolean).join(" ").toLowerCase().includes(needle);
       });
     }
@@ -609,7 +610,7 @@
       <div class="toolbar">
         <div class="search">
           <span>&#9906;</span>
-          <input id="purchase-search" type="search" placeholder="Search product, store, associate…"
+          <input id="purchase-search" type="search" placeholder="Search product, brand, store…"
             value="${esc(q)}" />
         </div>
         <select id="purchase-sort" class="select" aria-label="Sort">
@@ -659,7 +660,8 @@
           <div class="card-main">
             <div class="card-title">${esc(p.product)}</div>
             <div class="card-sub">
-              ${p.store ? `<span class="chip">${esc(p.store)}</span> ` : ""}
+              ${p.brand ? `<span class="chip">${esc(p.brand)}</span> ` : ""}
+              ${p.store && p.store !== p.brand ? `<span class="chip">${esc(p.store)}</span> ` : ""}
               ${esc(sub)}
             </div>
             ${p.notes ? `<div class="card-notes">${esc(p.notes)}</div>` : ""}
@@ -760,7 +762,8 @@
           <h2>${esc(p.product)}</h2>
           <div class="amount big" style="margin-bottom:10px;">${money(p.cost)}</div>
           <div class="card-sub" style="margin-bottom:12px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
-            ${p.store ? `<span class="chip">${esc(p.store)}</span>` : ""}
+            ${p.brand ? `<span class="chip">${esc(p.brand)}</span>` : ""}
+            ${p.store && p.store !== p.brand ? `<span class="chip">${esc(p.store)}</span>` : ""}
             ${meta ? `<span>${esc(meta)}</span>` : ""}
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px;">
@@ -830,13 +833,17 @@
       </div>
       <div class="field-row">
         <div class="field">
+          <label>Brand</label>
+          <select id="f-brand">${brandSelectOptions(p.brand || "")}</select>
+        </div>
+        <div class="field">
           <label>Store</label>
           <select id="f-store">${storeSelectOptions(p.store || "")}</select>
         </div>
-        <div class="field">
-          <label>Sales Associate</label>
-          <select id="f-contact">${contactOptions}</select>
-        </div>
+      </div>
+      <div class="field">
+        <label>Sales Associate</label>
+        <select id="f-contact">${contactOptions}</select>
       </div>
       <div class="field-row">
         <div class="field">
@@ -872,6 +879,7 @@
           product,
           cost: Number(cost),
           date: $("#f-date").value || todayISO(),
+          brand: $("#f-brand").value || "",
           store: $("#f-store").value || "",
           contactId: $("#f-contact").value || "",
           paymentMethod: paymentName || "",
@@ -904,6 +912,7 @@
       $("#f-cashback-preview").value = pct > 0 ? `${money((cost * pct) / 100)} (${pct}%)` : "—";
     };
 
+    $("#f-brand").addEventListener("change", (e) => handleBrandSelectChange(e.target));
     $("#f-store").addEventListener("change", (e) => handleStoreSelectChange(e.target));
     $("#f-payment").addEventListener("change", (e) => { handlePaymentSelectChange(e.target); updateCashbackPreview(); });
     $("#f-cost").addEventListener("input", updateCashbackPreview);
@@ -1131,20 +1140,18 @@
           </figure>`).join("")}
       </div>`;
 
-    const rows = items.map((p) => {
-      const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
-      const sub = [p.store, contact ? contact.name : null].filter(Boolean).join(" · ");
-      return `
+    // The statement deliberately omits store and sales associate — only the
+    // brand is disclosed alongside the product.
+    const rows = items.map((p) => `
         <tr>
           <td class="st-date">${esc(fmtDate(p.date))}</td>
           <td>
             <div class="st-prod">${esc(p.product)}</div>
-            ${sub ? `<div class="st-prod-sub">${esc(sub)}</div>` : ""}
+            ${p.brand ? `<div class="st-prod-sub">${esc(p.brand)}</div>` : ""}
             ${p.reimbursed ? `<div class="st-prod-sub">Reimbursed ${esc(fmtDate(p.reimbursedDate))}</div>` : ""}
           </td>
           <td class="amt">${money(p.cost)}</td>
-        </tr>`;
-    }).join("");
+        </tr>`).join("");
 
     const overlay = document.createElement("div");
     overlay.className = "statement-overlay";
@@ -1351,12 +1358,29 @@
   /* ============================================================
      Managed option lists — stores &amp; payment methods
      ============================================================ */
-  function storeSelectOptions(selected) {
-    const opts = db.settings.stores
+  // Simple string lists (stores, brands) share one picklist implementation.
+  // `key` is the settings array name; `noun` is used in the UI copy.
+  function listSelectOptions(key, selected, noun) {
+    const opts = (db.settings[key] || [])
       .map((s) => `<option value="${esc(s)}" ${s === selected ? "selected" : ""}>${esc(s)}</option>`)
       .join("");
-    return `<option value="">— select store —</option>${opts}<option value="__add__">+ Add new store…</option>`;
+    return `<option value="">— select ${esc(noun)} —</option>${opts}<option value="__add__">+ Add new ${esc(noun)}…</option>`;
   }
+
+  function handleListSelectChange(selectEl, key, noun) {
+    if (selectEl.value !== "__add__") return;
+    const name = prompt(`Add a new ${noun}:`);
+    if (!name || !name.trim()) { selectEl.value = ""; return; }
+    const clean = name.trim();
+    if (!(db.settings[key] || []).some((s) => s.toLowerCase() === clean.toLowerCase())) {
+      db.settings[key] = (db.settings[key] || []).concat(clean);
+      save();
+    }
+    addOptionAndSelect(selectEl, clean);
+  }
+
+  const storeSelectOptions = (selected) => listSelectOptions("stores", selected, "store");
+  const brandSelectOptions = (selected) => listSelectOptions("brands", selected, "brand");
 
   function paymentSelectOptions(selected) {
     const opts = db.settings.paymentMethods
@@ -1378,17 +1402,8 @@
     selectEl.value = value;
   }
 
-  function handleStoreSelectChange(selectEl) {
-    if (selectEl.value !== "__add__") return;
-    const name = prompt("Add a new store:");
-    if (!name || !name.trim()) { selectEl.value = ""; return; }
-    const clean = name.trim();
-    if (!db.settings.stores.some((s) => s.toLowerCase() === clean.toLowerCase())) {
-      db.settings.stores.push(clean);
-      save();
-    }
-    addOptionAndSelect(selectEl, clean);
-  }
+  const handleStoreSelectChange = (el) => handleListSelectChange(el, "stores", "store");
+  const handleBrandSelectChange = (el) => handleListSelectChange(el, "brands", "brand");
 
   function handlePaymentSelectChange(selectEl) {
     if (selectEl.value !== "__add__") return;
@@ -1406,31 +1421,33 @@
     addOptionAndSelect(selectEl, match.name);
   }
 
-  function openStoreManager() {
-    const listHTML = db.settings.stores.length
-      ? db.settings.stores.map((s) => `
+  // Add/remove screen for a simple string list (stores, brands).
+  function openListManager(key, title, noun, placeholder) {
+    const list = db.settings[key] || [];
+    const listHTML = list.length
+      ? list.map((s) => `
         <div class="mini-row">
           <div class="mini-row-title">${esc(s)}</div>
-          <button type="button" class="mini-btn" data-store="${esc(s)}">Remove</button>
+          <button type="button" class="mini-btn" data-item="${esc(s)}">Remove</button>
         </div>`).join("")
-      : `<p class="hint">No stores yet.</p>`;
+      : `<p class="hint">No ${esc(noun)}s yet.</p>`;
 
     const root = $("#modal-root");
     root.innerHTML = `
       <div class="modal-backdrop">
         <div class="modal" role="dialog" aria-modal="true">
           <div class="modal-grip"></div>
-          <h2>Stores</h2>
-          <div id="store-list">${listHTML}</div>
+          <h2>${esc(title)}</h2>
+          <div id="list-items">${listHTML}</div>
           <div class="field" style="margin-top:14px;">
-            <label>Add a store</label>
+            <label>Add a ${esc(noun)}</label>
             <div style="display:flex; gap:8px;">
-              <input id="new-store" type="text" placeholder="e.g. Fendi" style="flex:1;" />
-              <button type="button" class="btn btn-primary" id="add-store" style="flex:0 0 auto; padding:12px 18px;">Add</button>
+              <input id="new-item" type="text" placeholder="${esc(placeholder)}" style="flex:1;" />
+              <button type="button" class="btn btn-primary" id="add-item" style="flex:0 0 auto; padding:12px 18px;">Add</button>
             </div>
           </div>
           <div class="modal-actions">
-            <button type="button" class="btn btn-ghost" id="store-close">Close</button>
+            <button type="button" class="btn btn-ghost" id="list-close">Close</button>
           </div>
         </div>
       </div>`;
@@ -1439,24 +1456,27 @@
     $(".modal-backdrop", root).addEventListener("click", (e) => {
       if (e.target.classList.contains("modal-backdrop")) close();
     });
-    $("#store-close", root).addEventListener("click", close);
-    $("#add-store", root).addEventListener("click", () => {
-      const val = $("#new-store", root).value.trim();
+    $("#list-close", root).addEventListener("click", close);
+    $("#add-item", root).addEventListener("click", () => {
+      const val = $("#new-item", root).value.trim();
       if (!val) return;
-      if (!db.settings.stores.some((s) => s.toLowerCase() === val.toLowerCase())) {
-        db.settings.stores.push(val);
+      if (!(db.settings[key] || []).some((s) => s.toLowerCase() === val.toLowerCase())) {
+        db.settings[key] = (db.settings[key] || []).concat(val);
         save();
       }
-      openStoreManager();
+      openListManager(key, title, noun, placeholder);
     });
-    root.querySelectorAll("[data-store]").forEach((btn) => {
+    root.querySelectorAll("[data-item]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        db.settings.stores = db.settings.stores.filter((s) => s !== btn.dataset.store);
+        db.settings[key] = (db.settings[key] || []).filter((s) => s !== btn.dataset.item);
         save();
-        openStoreManager();
+        openListManager(key, title, noun, placeholder);
       });
     });
   }
+
+  const openStoreManager = () => openListManager("stores", "Stores", "store", "e.g. Fendi");
+  const openBrandManager = () => openListManager("brands", "Brands", "brand", "e.g. Fendi");
 
   function openPaymentManager() {
     const listHTML = db.settings.paymentMethods.length
@@ -1564,6 +1584,7 @@
       It also works offline and catches up when you reconnect.</p>
       <div class="modal-actions" style="flex-direction:column; gap:10px;">
         <button type="button" class="btn btn-ghost" id="m-stores">Manage stores</button>
+        <button type="button" class="btn btn-ghost" id="m-brands">Manage brands</button>
         <button type="button" class="btn btn-ghost" id="m-payments">Manage payment methods</button>
         <button type="button" class="btn btn-primary" id="m-export">Export backup (.json)</button>
         <button type="button" class="btn btn-ghost" id="m-import">Import backup</button>
@@ -1586,6 +1607,7 @@
     const close = () => (root.innerHTML = "");
     $("#m-close", root).addEventListener("click", close);
     $("#m-stores", root).addEventListener("click", openStoreManager);
+    $("#m-brands", root).addEventListener("click", openBrandManager);
     $("#m-payments", root).addEventListener("click", openPaymentManager);
     $("#m-export", root).addEventListener("click", exportData);
     $("#m-import", root).addEventListener("click", () => $("#m-file", root).click());
