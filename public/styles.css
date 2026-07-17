@@ -312,6 +312,39 @@ body {
   margin-top: 24px; font-size: 12.5px; color: var(--ink-soft); font-family: var(--font-sans);
 }
 
+/* Receipt chip in the purchase detail view */
+.receipt-line { margin-bottom: 16px; }
+.receipt-chip {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 6px 14px 6px 6px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface-2); color: var(--ink); cursor: pointer;
+  font: inherit; font-size: 14px; font-weight: 600;
+}
+.receipt-chip img {
+  width: 34px; height: 34px; border-radius: 50%; object-fit: cover;
+  border: 1px solid var(--line); background: #fff;
+}
+.receipt-chip:active { background: var(--line); }
+.hint.warn { color: var(--amber); }
+
+/* Receipts appended to the statement */
+.st-receipts { margin-top: 34px; border-top: 2px solid var(--ink); padding-top: 18px; }
+.st-receipts-title {
+  font-size: 18px; font-weight: 400; margin: 0 0 12px;
+}
+.st-missing-note {
+  font-family: var(--font-sans); font-size: 12.5px; color: var(--amber);
+  background: var(--amber-soft); border-radius: 8px; padding: 10px 12px; margin: 0 0 16px;
+}
+.st-receipt { margin: 0 0 22px; }
+.st-receipt img {
+  width: 100%; max-width: 460px; display: block;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.st-receipt figcaption {
+  font-family: var(--font-sans); font-size: 12px; color: var(--ink-soft); margin-top: 6px;
+}
+
 /* Narrow phones: give the product column room to breathe. */
 @media (max-width: 430px) {
   .statement-doc { padding: 20px 14px 50px; font-size: 14px; }
@@ -331,6 +364,9 @@ body {
   .statement-overlay { position: static; overflow: visible; }
   .statement-bar { display: none; }
   .statement-doc { max-width: none; padding: 0; }
+  /* Keep each receipt whole, and start the receipts on their own page. */
+  .st-receipts { break-before: page; page-break-before: always; border-top: 0; }
+  .st-receipt { break-inside: avoid; page-break-inside: avoid; }
 }
 
 /* Photo drop zone (purchase form) */
@@ -341,6 +377,7 @@ body {
   transition: border-color .15s ease, background .15s ease;
 }
 .photo-drop.drag-over { border-color: var(--gold); background: var(--gold-soft); }
+.photo-drop.busy { opacity: .6; pointer-events: none; }
 .photo-placeholder { text-align: center; color: var(--ink-soft); font-size: 13.5px; }
 .photo-placeholder-ico { font-size: 26px; margin-bottom: 6px; }
 .photo-placeholder p { margin: 0; }

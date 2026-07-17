@@ -16,10 +16,15 @@ awaiting reimbursement, hours worked, and compensation.
   tap a card to see everything bought through that person plus total spend.
 - **Purchases** — log a product + cost + store + sales associate + payment method,
   keep it on the "Awaiting" list, then mark it reimbursed when paid back. Cashback
-  is computed automatically from the payment method's rate. Attach a photo by
-  dragging one in, dropping it, or tapping to choose from your device — it shows
-  as a thumbnail in the purchases list and in that sales associate's purchase
-  history.
+  is computed automatically from the payment method's rate. Attach a product photo
+  and a receipt by dragging one in, dropping it, or tapping to choose from your
+  device — the photo shows as a thumbnail in the purchases list and in that sales
+  associate's purchase history. Tap a purchase to see its full detail, tap its
+  photo or receipt to view full screen. Search and sort the list.
+- **Statement** — "Generate statement" on the Purchases tab builds a printable
+  statement (date, product description, amount, grand total). Defaults to all
+  items awaiting reimbursement; can also be scoped to a month or hand-picked.
+  Optionally attaches each item's receipt and flags any item missing one.
 - **Hours** — log hours + notes and mark them reimbursed when paid.
 - **Stores & payment methods** — managed lists (☰ menu → Manage stores / Manage
   payment methods) so those fields stay picklists instead of free text; you can

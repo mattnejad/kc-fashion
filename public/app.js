@@ -105,6 +105,22 @@
     return ((parts[0]?.[0] || "") + (parts[1]?.[0] || "")).toUpperCase() || "?";
   }
 
+  // Firestore caps a document at 1 MiB and each purchase can now carry both a
+  // product photo and a receipt, so shrink until the data URL fits its budget.
+  // Receipts get a bigger budget//dimension because the text must stay readable.
+  async function compressToBudget(file, maxDim, budget) {
+    let dim = maxDim;
+    let quality = 0.75;
+    let out = await compressImage(file, dim, quality);
+    for (let i = 0; i < 8 && out.length > budget; i++) {
+      if (quality > 0.45) quality -= 0.1;
+      else if (dim > 600) { dim = Math.round(dim * 0.8); quality = 0.6; }
+      else break;
+      out = await compressImage(file, dim, quality);
+    }
+    return out;
+  }
+
   function compressImage(file, maxDim = 900, quality = 0.75) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -754,7 +770,15 @@
             ${p.paymentMethod ? `<span class="chip">${esc(p.paymentMethod)}</span>` : ""}
             ${cashbackAmt > 0 ? `<span class="chip green">+${money(cashbackAmt)} cashback</span>` : ""}
           </div>
-          ${p.notes ? `<div class="card-notes" style="margin-bottom:6px;">${esc(p.notes)}</div>` : ""}
+          ${p.notes ? `<div class="card-notes" style="margin-bottom:12px;">${esc(p.notes)}</div>` : ""}
+          <div class="receipt-line">
+            ${p.receipt
+              ? `<button type="button" class="receipt-chip" id="view-receipt-btn">
+                   <img src="${esc(p.receipt)}" alt="" />
+                   <span>View receipt</span>
+                 </button>`
+              : `<span class="chip amber">No receipt attached</span>`}
+          </div>
           <div class="modal-actions">
             <button type="button" class="btn btn-ghost" id="view-close">Close</button>
             <button type="button" class="btn btn-ghost" id="view-toggle">${p.reimbursed ? "Mark unpaid" : "Mark paid"}</button>
@@ -768,6 +792,7 @@
       if (e.target.classList.contains("modal-backdrop")) close();
     });
     $("#view-photo-btn", root)?.addEventListener("click", () => openPhotoViewer(p.photo));
+    $("#view-receipt-btn", root)?.addEventListener("click", () => openPhotoViewer(p.receipt));
     $("#view-close", root).addEventListener("click", close);
     $("#view-edit", root).addEventListener("click", () => { close(); openPurchaseForm(p); });
     $("#view-toggle", root).addEventListener("click", () => {
@@ -782,6 +807,7 @@
 
   function openPurchaseForm(existing) {
     const p = existing || {};
+    let photoField, receiptField; // set once the modal markup exists (below)
     const contactOptions = ['<option value="">— none —</option>']
       .concat(db.contacts.slice().sort((a,b)=>(a.name||"").localeCompare(b.name||""))
         .map((c) => `<option value="${c.id}" data-store="${esc(c.store || "")}" ${p.contactId===c.id?"selected":""}>${esc(c.name)}${c.store?` (${esc(c.store)})`:""}</option>`))
@@ -822,20 +848,8 @@
           <input id="f-cashback-preview" type="text" value="—" disabled />
         </div>
       </div>
-      <div class="field">
-        <label>Photo</label>
-        <div id="photo-drop" class="photo-drop">
-          <div id="photo-preview-wrap" class="photo-preview-wrap" style="${p.photo ? "" : "display:none;"}">
-            <img id="photo-preview" src="${p.photo || ""}" alt="Product photo" />
-            <button type="button" class="mini-btn photo-remove" id="photo-remove">Remove</button>
-          </div>
-          <div id="photo-placeholder" class="photo-placeholder" style="${p.photo ? "display:none;" : ""}">
-            <div class="photo-placeholder-ico">&#128247;</div>
-            <p>Drag &amp; drop a photo here, or tap to choose</p>
-          </div>
-        </div>
-        <input id="f-photo-input" type="file" accept="image/*" hidden />
-      </div>
+      ${imageDropHtml("photo", "Photo", p.photo, "&#128247;", "Drag &amp; drop a photo here, or tap to choose")}
+      ${imageDropHtml("receipt", "Receipt", p.receipt, "&#129534;", "Add the receipt — drop it here, or tap to choose")}
       <div class="field">
         <label>Notes</label>
         <textarea id="f-notes" placeholder="Client, order #, anything to remember…">${esc(p.notes || "")}</textarea>
@@ -862,12 +876,19 @@
           contactId: $("#f-contact").value || "",
           paymentMethod: paymentName || "",
           cashbackPercent: pm ? pm.cashbackPercent : 0,
-          photo: photoDataUrl,
+          photo: photoField.value(),
+          receipt: receiptField.value(),
           notes: $("#f-notes").value.trim(),
           reimbursed,
           reimbursedDate: reimbursed ? (p.reimbursedDate || todayISO()) : "",
           createdAt: p.createdAt || Date.now(),
         };
+        // Firestore rejects documents over 1 MiB; fail loudly rather than
+        // silently losing the purchase.
+        if (JSON.stringify(rec).length > 1000000) {
+          toast("Photo + receipt are too large — remove or retake one");
+          return false;
+        }
         upsert("purchases", rec);
         toast(existing ? "Purchase updated" : "Purchase added");
         renderPurchases();
@@ -894,50 +915,71 @@
     });
     updateCashbackPreview();
 
-    let photoDataUrl = p.photo || "";
-    const dropZone = $("#photo-drop");
-    const fileInput = $("#f-photo-input");
-    const preview = $("#photo-preview");
-    const previewWrap = $("#photo-preview-wrap");
-    const placeholder = $("#photo-placeholder");
+    photoField = setupImageDrop("photo", p.photo, { maxDim: 900, budget: 320000 });
+    receiptField = setupImageDrop("receipt", p.receipt, { maxDim: 1600, budget: 480000 });
+  }
 
-    function showPhoto(dataUrl) {
-      photoDataUrl = dataUrl;
-      if (dataUrl) {
-        preview.src = dataUrl;
-        previewWrap.style.display = "";
-        placeholder.style.display = "none";
-      } else {
-        preview.src = "";
-        previewWrap.style.display = "none";
-        placeholder.style.display = "";
-      }
+  // Markup for one drag-and-drop / tap-to-choose image field.
+  function imageDropHtml(key, label, value, icon, hint) {
+    return `
+      <div class="field">
+        <label>${esc(label)}</label>
+        <div id="${key}-drop" class="photo-drop">
+          <div id="${key}-preview-wrap" class="photo-preview-wrap" style="${value ? "" : "display:none;"}">
+            <img id="${key}-preview" src="${esc(value || "")}" alt="${esc(label)}" />
+            <button type="button" class="mini-btn photo-remove" id="${key}-remove">Remove</button>
+          </div>
+          <div id="${key}-placeholder" class="photo-placeholder" style="${value ? "display:none;" : ""}">
+            <div class="photo-placeholder-ico">${icon}</div>
+            <p>${hint}</p>
+          </div>
+        </div>
+        <input id="${key}-input" type="file" accept="image/*" hidden />
+      </div>`;
+  }
+
+  // Wires up an image drop field; returns { value() } for reading it back.
+  function setupImageDrop(key, initial, { maxDim, budget }) {
+    let dataUrl = initial || "";
+    const dropZone = $(`#${key}-drop`);
+    const fileInput = $(`#${key}-input`);
+    const preview = $(`#${key}-preview`);
+    const previewWrap = $(`#${key}-preview-wrap`);
+    const placeholder = $(`#${key}-placeholder`);
+
+    function show(url) {
+      dataUrl = url;
+      preview.src = url || "";
+      previewWrap.style.display = url ? "" : "none";
+      placeholder.style.display = url ? "none" : "";
     }
 
-    async function handlePhotoFile(file) {
+    async function handleFile(file) {
       if (!file) return;
       if (!file.type.startsWith("image/")) { toast("Please choose an image file"); return; }
+      dropZone.classList.add("busy");
       try {
-        showPhoto(await compressImage(file));
+        show(await compressToBudget(file, maxDim, budget));
       } catch (err) {
         console.error(err);
-        toast("Couldn't read that photo");
+        toast("Couldn't read that image");
+      } finally {
+        dropZone.classList.remove("busy");
       }
     }
 
     dropZone.addEventListener("click", () => fileInput.click());
-    fileInput.addEventListener("change", () => handlePhotoFile(fileInput.files[0]));
+    fileInput.addEventListener("change", () => handleFile(fileInput.files[0]));
     dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag-over"); });
     dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
     dropZone.addEventListener("drop", (e) => {
       e.preventDefault();
       dropZone.classList.remove("drag-over");
-      handlePhotoFile(e.dataTransfer.files[0]);
+      handleFile(e.dataTransfer.files[0]);
     });
-    $("#photo-remove").addEventListener("click", (e) => {
-      e.stopPropagation();
-      showPhoto("");
-    });
+    $(`#${key}-remove`).addEventListener("click", (e) => { e.stopPropagation(); show(""); });
+
+    return { value: () => dataUrl };
   }
 
   /* ============================================================
@@ -996,13 +1038,20 @@
         <label>Items</label>
         <div class="pick-list">${pickRows}</div>
       </div>
+      <div class="check-field">
+        <input id="st-receipts" type="checkbox" checked />
+        <label for="st-receipts">Attach receipts to the statement</label>
+      </div>
       <p class="hint" id="st-preview"></p>
+      <p class="hint warn" id="st-missing" style="display:none;"></p>
     `, {
       saveLabel: "Generate",
       onSave: () => {
         const items = statementSelection();
         if (!items.length) { toast("Nothing selected for the statement"); return false; }
-        openStatementDoc(items, statementSubtitle());
+        openStatementDoc(items, statementSubtitle(), {
+          includeReceipts: $("#st-receipts").checked,
+        });
         return true;
       },
     });
@@ -1016,6 +1065,17 @@
       const total = items.reduce((sum, p) => sum + (Number(p.cost) || 0), 0);
       $("#st-preview").textContent =
         `${items.length} item${items.length === 1 ? "" : "s"} · ${money(total)} total`;
+
+      // Flag anything on the statement that has no receipt attached.
+      const missing = items.filter((p) => !p.receipt);
+      const warn = $("#st-missing");
+      if (missing.length) {
+        const names = missing.map((p) => p.product).join(", ");
+        warn.textContent = `${missing.length} item${missing.length === 1 ? " has" : "s have"} no receipt: ${names}`;
+        warn.style.display = "";
+      } else {
+        warn.style.display = "none";
+      }
     };
     $("#modal-form").addEventListener("change", syncFields);
     syncFields();
@@ -1051,8 +1111,25 @@
 
   // Full-screen printable statement. Back button + phone back gesture return
   // to the app; Print opens the OS print/save-as-PDF sheet.
-  function openStatementDoc(items, subtitle) {
+  function openStatementDoc(items, subtitle, { includeReceipts = false } = {}) {
     const total = items.reduce((s, p) => s + (Number(p.cost) || 0), 0);
+    const withReceipt = items.filter((p) => p.receipt);
+    const missingReceipt = items.filter((p) => !p.receipt);
+
+    const receiptsSection = !includeReceipts ? "" : `
+      <div class="st-receipts">
+        <h2 class="st-receipts-title">Receipts</h2>
+        ${missingReceipt.length ? `
+          <p class="st-missing-note">
+            No receipt on file for:
+            ${esc(missingReceipt.map((p) => `${p.product} (${fmtDate(p.date)})`).join(", "))}
+          </p>` : ""}
+        ${withReceipt.map((p) => `
+          <figure class="st-receipt">
+            <img src="${esc(p.receipt)}" alt="Receipt for ${esc(p.product)}" />
+            <figcaption>${esc(fmtDate(p.date))} &middot; ${esc(p.product)} &middot; ${money(p.cost)}</figcaption>
+          </figure>`).join("")}
+      </div>`;
 
     const rows = items.map((p) => {
       const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
@@ -1103,6 +1180,7 @@
           </tfoot>
         </table>
         <p class="st-foot-note">Amounts paid out of pocket and submitted for reimbursement.</p>
+        ${receiptsSection}
       </div>`;
 
     document.body.appendChild(overlay);
