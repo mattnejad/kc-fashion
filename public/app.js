@@ -1048,7 +1048,7 @@
         <div class="pick-list">${pickRows}</div>
       </div>
       <div class="check-field">
-        <input id="st-receipts" type="checkbox" checked />
+        <input id="st-receipts" type="checkbox" />
         <label for="st-receipts">Attach receipts to the statement</label>
       </div>
       <p class="hint" id="st-preview"></p>
@@ -1075,8 +1075,9 @@
       $("#st-preview").textContent =
         `${items.length} item${items.length === 1 ? "" : "s"} · ${money(total)} total`;
 
-      // Flag anything on the statement that has no receipt attached.
-      const missing = items.filter((p) => !p.receipt);
+      // Only warn about missing receipts when receipts are actually being
+      // attached — otherwise it is noise.
+      const missing = $("#st-receipts").checked ? items.filter((p) => !p.receipt) : [];
       const warn = $("#st-missing");
       if (missing.length) {
         const names = missing.map((p) => p.product).join(", ");
