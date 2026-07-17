@@ -856,7 +856,7 @@
         </div>
       </div>
       ${imageDropHtml("photo", "Photo", p.photo, "&#128247;", "Drag &amp; drop a photo here, or tap to choose")}
-      ${imageDropHtml("receipt", "Receipt", p.receipt, "&#129534;", "Add the receipt — drop it here, or tap to choose")}
+      ${imageDropHtml("receipt", "Receipt", p.receipt, "&#129534;", "Add the receipt — drop it here, or tap to choose", true)}
       <div class="field">
         <label>Notes</label>
         <textarea id="f-notes" placeholder="Client, order #, anything to remember…">${esc(p.notes || "")}</textarea>
@@ -925,18 +925,21 @@
     updateCashbackPreview();
 
     photoField = setupImageDrop("photo", p.photo, { maxDim: 900, budget: 320000 });
-    receiptField = setupImageDrop("receipt", p.receipt, { maxDim: 1600, budget: 480000 });
+    receiptField = setupImageDrop("receipt", p.receipt, { maxDim: 1600, budget: 480000, redactable: true });
   }
 
   // Markup for one drag-and-drop / tap-to-choose image field.
-  function imageDropHtml(key, label, value, icon, hint) {
+  function imageDropHtml(key, label, value, icon, hint, redactable) {
     return `
       <div class="field">
         <label>${esc(label)}</label>
         <div id="${key}-drop" class="photo-drop">
           <div id="${key}-preview-wrap" class="photo-preview-wrap" style="${value ? "" : "display:none;"}">
             <img id="${key}-preview" src="${esc(value || "")}" alt="${esc(label)}" />
-            <button type="button" class="mini-btn photo-remove" id="${key}-remove">Remove</button>
+            <div class="photo-preview-actions">
+              ${redactable ? `<button type="button" class="mini-btn" id="${key}-redact">Hide details</button>` : ""}
+              <button type="button" class="mini-btn photo-remove" id="${key}-remove">Remove</button>
+            </div>
           </div>
           <div id="${key}-placeholder" class="photo-placeholder" style="${value ? "display:none;" : ""}">
             <div class="photo-placeholder-ico">${icon}</div>
@@ -948,7 +951,7 @@
   }
 
   // Wires up an image drop field; returns { value() } for reading it back.
-  function setupImageDrop(key, initial, { maxDim, budget }) {
+  function setupImageDrop(key, initial, { maxDim, budget, redactable } = {}) {
     let dataUrl = initial || "";
     const dropZone = $(`#${key}-drop`);
     const fileInput = $(`#${key}-input`);
@@ -987,8 +990,166 @@
       handleFile(e.dataTransfer.files[0]);
     });
     $(`#${key}-remove`).addEventListener("click", (e) => { e.stopPropagation(); show(""); });
+    if (redactable) {
+      $(`#${key}-redact`)?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!dataUrl) { toast("Add a receipt first"); return; }
+        openRedactor(dataUrl, budget, (redacted) => show(redacted));
+      });
+    }
 
     return { value: () => dataUrl };
+  }
+
+  // Re-encode a canvas to a JPEG data URL that fits the byte budget. Because
+  // the redaction boxes are painted onto the pixels before this runs, the
+  // covered content is destroyed — there is no hidden layer to recover, and
+  // JPEG re-encoding also strips any original EXIF/GPS metadata.
+  function canvasToJpegBudget(srcCanvas, budget) {
+    let canvas = srcCanvas;
+    let quality = 0.8;
+    let out = canvas.toDataURL("image/jpeg", quality);
+    for (let i = 0; i < 8 && out.length > budget; i++) {
+      if (quality > 0.45) {
+        quality -= 0.1;
+      } else if (Math.max(canvas.width, canvas.height) > 700) {
+        const c2 = document.createElement("canvas");
+        c2.width = Math.round(canvas.width * 0.8);
+        c2.height = Math.round(canvas.height * 0.8);
+        c2.getContext("2d").drawImage(canvas, 0, 0, c2.width, c2.height);
+        canvas = c2;
+        quality = 0.6;
+      } else break;
+      out = canvas.toDataURL("image/jpeg", quality);
+    }
+    return out;
+  }
+
+  // Manual redaction: the user drags opaque boxes over anything to hide, sees
+  // exactly what is covered, then Apply bakes the boxes into the pixels at full
+  // resolution. Certainty comes from her own eyes; permanence from destroying
+  // the pixels and re-encoding (see canvasToJpegBudget).
+  function openRedactor(dataUrl, budget, onApply) {
+    if (!dataUrl) return;
+    const img = new Image();
+    img.onerror = () => toast("Couldn't open that image");
+    img.onload = () => buildRedactor(img, budget, onApply);
+    img.src = dataUrl;
+  }
+
+  function buildRedactor(img, budget, onApply) {
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (!iw || !ih) { toast("Couldn't open that image"); return; }
+
+    const overlay = document.createElement("div");
+    overlay.className = "redactor";
+    overlay.innerHTML = `
+      <div class="redactor-bar">
+        <button type="button" class="btn btn-ghost redactor-cancel">Cancel</button>
+        <span class="redactor-hint">Drag over anything to hide</span>
+        <button type="button" class="btn btn-primary redactor-apply">Apply</button>
+      </div>
+      <div class="redactor-stage"><canvas class="redactor-canvas"></canvas></div>
+      <div class="redactor-tools">
+        <button type="button" class="btn btn-ghost redactor-undo">Undo</button>
+        <button type="button" class="btn btn-ghost redactor-clear">Clear</button>
+      </div>`;
+    document.body.appendChild(overlay);
+    document.body.classList.add("no-scroll");
+
+    const canvas = overlay.querySelector(".redactor-canvas");
+    const ctx = canvas.getContext("2d");
+    const stage = overlay.querySelector(".redactor-stage");
+    const boxes = [];   // {x,y,w,h} in image coordinates
+    let drag = null;    // {x0,y0,x1,y1} in image coordinates
+    let scale = 1;
+
+    const normRect = (d) => ({
+      x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1),
+      w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0),
+    });
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#000";
+      boxes.forEach((b) => ctx.fillRect(b.x * scale, b.y * scale, b.w * scale, b.h * scale));
+      if (drag) {
+        const r = normRect(drag);
+        ctx.fillStyle = "rgba(0,0,0,0.82)";
+        ctx.fillRect(r.x * scale, r.y * scale, r.w * scale, r.h * scale);
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
+        ctx.strokeRect(r.x * scale + 0.5, r.y * scale + 0.5, r.w * scale, r.h * scale);
+      }
+    }
+
+    function layout() {
+      const pad = 16;
+      const maxW = stage.clientWidth - pad * 2;
+      const maxH = stage.clientHeight - pad * 2;
+      scale = Math.min(maxW / iw, maxH / ih);
+      if (!isFinite(scale) || scale <= 0) scale = 1;
+      canvas.width = Math.max(1, Math.round(iw * scale));
+      canvas.height = Math.max(1, Math.round(ih * scale));
+      render();
+    }
+
+    function toImg(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(iw, (e.clientX - rect.left) / scale)),
+        y: Math.max(0, Math.min(ih, (e.clientY - rect.top) / scale)),
+      };
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* not critical */ }
+      const p = toImg(e);
+      drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const p = toImg(e);
+      drag.x1 = p.x; drag.y1 = p.y;
+      render();
+    });
+    function endDrag() {
+      if (!drag) return;
+      const r = normRect(drag);
+      drag = null;
+      if (r.w > 3 && r.h > 3) boxes.push(r);
+      render();
+    }
+    canvas.addEventListener("pointerup", endDrag);
+    canvas.addEventListener("pointercancel", endDrag);
+
+    const close = () => {
+      overlay.remove();
+      document.body.classList.remove("no-scroll");
+      window.removeEventListener("resize", layout);
+    };
+
+    overlay.querySelector(".redactor-undo").addEventListener("click", () => { boxes.pop(); render(); });
+    overlay.querySelector(".redactor-clear").addEventListener("click", () => { boxes.length = 0; render(); });
+    overlay.querySelector(".redactor-cancel").addEventListener("click", close);
+    overlay.querySelector(".redactor-apply").addEventListener("click", () => {
+      if (!boxes.length) { close(); return; } // nothing drawn — leave original untouched
+      const out = document.createElement("canvas");
+      out.width = iw; out.height = ih;
+      const octx = out.getContext("2d");
+      octx.drawImage(img, 0, 0, iw, ih);
+      octx.fillStyle = "#000";
+      boxes.forEach((b) => octx.fillRect(b.x, b.y, b.w, b.h));
+      const redacted = canvasToJpegBudget(out, budget || 480000);
+      close();
+      onApply(redacted);
+      toast("Details hidden and baked into the image");
+    });
+
+    window.addEventListener("resize", layout);
+    layout();
   }
 
   /* ============================================================

@@ -20,7 +20,9 @@ awaiting reimbursement, hours worked, and compensation.
   and a receipt by dragging one in, dropping it, or tapping to choose from your
   device — the photo shows as a thumbnail in the purchases list and in that sales
   associate's purchase history. Tap a purchase to see its full detail, tap its
-  photo or receipt to view full screen. Search and sort the list.
+  photo or receipt to view full screen. Search and sort the list. A receipt can
+  be redacted ("Hide details"): drag boxes over anything to hide, and Apply bakes
+  them permanently into the image pixels (re-encoded, no recoverable original).
 - **Statement** — "Generate statement" on the Purchases tab builds a printable
   statement (date, product, brand, amount, grand total). Defaults to all items
   awaiting reimbursement; can also be scoped to a month or hand-picked.
