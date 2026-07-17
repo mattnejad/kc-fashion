@@ -584,10 +584,12 @@
 
     viewEl.innerHTML = `
       <h2 class="view-title">Purchases</h2>
-      <div class="stat full" style="margin-bottom:14px;">
+      <div class="stat full" style="margin-bottom:10px;">
         <div class="stat-label">Currently awaiting reimbursement</div>
         <div class="stat-value amber">${money(owed)}</div>
       </div>
+      <button type="button" class="btn btn-ghost" id="btn-statement"
+        style="width:100%; margin-bottom:14px;">Generate statement</button>
       <div class="toolbar">
         <div class="search">
           <span>&#9906;</span>
@@ -623,6 +625,7 @@
       ui.purchases.sort = e.target.value;
       renderPurchases();
     });
+    $("#btn-statement").addEventListener("click", openStatementBuilder);
     viewEl.querySelectorAll(".segment button").forEach((b) =>
       b.addEventListener("click", () => { ui.purchases.filter = b.dataset.f; renderPurchases(); })
     );
@@ -938,6 +941,197 @@
   }
 
   /* ============================================================
+     STATEMENT
+     Printable statement of purchases. Defaults to everything still
+     awaiting reimbursement; can also be scoped to a month or hand-picked.
+     ============================================================ */
+  function monthsWithPurchases() {
+    const keys = new Set();
+    db.purchases.forEach((p) => { if (p.date) keys.add(p.date.slice(0, 7)); });
+    return [...keys].sort().reverse();
+  }
+
+  function monthLabel(key) {
+    const [y, m] = key.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  }
+
+  const byDateAsc = (a, b) =>
+    (a.date || "").localeCompare(b.date || "") || (a.createdAt || 0) - (b.createdAt || 0);
+
+  function openStatementBuilder() {
+    if (!db.purchases.length) { toast("No purchases to put on a statement yet"); return; }
+    const months = monthsWithPurchases();
+
+    const pickRows = db.purchases.slice().sort((a, b) => -byDateAsc(a, b)).map((p) => `
+      <label class="pick-row">
+        <input type="checkbox" value="${esc(p.id)}" ${p.reimbursed ? "" : "checked"} />
+        <span class="pick-main">
+          <span class="pick-title">${esc(p.product)}</span>
+          <span class="pick-sub">${esc([fmtDate(p.date), p.store].filter(Boolean).join(" · "))}${p.reimbursed ? " · reimbursed" : ""}</span>
+        </span>
+        <span class="pick-amt">${money(p.cost)}</span>
+      </label>`).join("");
+
+    openModal("Generate statement", `
+      <div class="field">
+        <label>Include</label>
+        <select id="st-scope">
+          <option value="outstanding">All outstanding (not reimbursed)</option>
+          <option value="month">By month</option>
+          <option value="pick">Choose items myself</option>
+        </select>
+      </div>
+      <div class="field" id="st-month-field" style="display:none;">
+        <label>Month</label>
+        <select id="st-month">
+          ${months.map((m) => `<option value="${esc(m)}">${esc(monthLabel(m))}</option>`).join("")}
+        </select>
+        <div class="check-field" style="margin-top:10px;">
+          <input id="st-with-reimbursed" type="checkbox" />
+          <label for="st-with-reimbursed">Include items already reimbursed</label>
+        </div>
+      </div>
+      <div class="field" id="st-pick-field" style="display:none;">
+        <label>Items</label>
+        <div class="pick-list">${pickRows}</div>
+      </div>
+      <p class="hint" id="st-preview"></p>
+    `, {
+      saveLabel: "Generate",
+      onSave: () => {
+        const items = statementSelection();
+        if (!items.length) { toast("Nothing selected for the statement"); return false; }
+        openStatementDoc(items, statementSubtitle());
+        return true;
+      },
+    });
+
+    const scopeEl = $("#st-scope");
+    const syncFields = () => {
+      const s = scopeEl.value;
+      $("#st-month-field").style.display = s === "month" ? "" : "none";
+      $("#st-pick-field").style.display = s === "pick" ? "" : "none";
+      const items = statementSelection();
+      const total = items.reduce((sum, p) => sum + (Number(p.cost) || 0), 0);
+      $("#st-preview").textContent =
+        `${items.length} item${items.length === 1 ? "" : "s"} · ${money(total)} total`;
+    };
+    $("#modal-form").addEventListener("change", syncFields);
+    syncFields();
+  }
+
+  // Reads the builder's current controls and returns the chosen purchases.
+  function statementSelection() {
+    const scope = $("#st-scope")?.value || "outstanding";
+    if (scope === "pick") {
+      const ids = [...document.querySelectorAll(".pick-row input:checked")].map((i) => i.value);
+      return db.purchases.filter((p) => ids.includes(p.id)).sort(byDateAsc);
+    }
+    if (scope === "month") {
+      const m = $("#st-month")?.value || "";
+      const withReimbursed = $("#st-with-reimbursed")?.checked;
+      return db.purchases
+        .filter((p) => (p.date || "").startsWith(m) && (withReimbursed || !p.reimbursed))
+        .sort(byDateAsc);
+    }
+    return db.purchases.filter((p) => !p.reimbursed).sort(byDateAsc);
+  }
+
+  function statementSubtitle() {
+    const scope = $("#st-scope")?.value || "outstanding";
+    if (scope === "month") {
+      const m = $("#st-month")?.value || "";
+      const withReimbursed = $("#st-with-reimbursed")?.checked;
+      return `${monthLabel(m)}${withReimbursed ? "" : " · awaiting reimbursement"}`;
+    }
+    if (scope === "pick") return "Selected items";
+    return "All items awaiting reimbursement";
+  }
+
+  // Full-screen printable statement. Back button + phone back gesture return
+  // to the app; Print opens the OS print/save-as-PDF sheet.
+  function openStatementDoc(items, subtitle) {
+    const total = items.reduce((s, p) => s + (Number(p.cost) || 0), 0);
+
+    const rows = items.map((p) => {
+      const contact = p.contactId ? db.contacts.find((c) => c.id === p.contactId) : null;
+      const sub = [p.store, contact ? contact.name : null].filter(Boolean).join(" · ");
+      return `
+        <tr>
+          <td class="st-date">${esc(fmtDate(p.date))}</td>
+          <td>
+            <div class="st-prod">${esc(p.product)}</div>
+            ${sub ? `<div class="st-prod-sub">${esc(sub)}</div>` : ""}
+            ${p.reimbursed ? `<div class="st-prod-sub">Reimbursed ${esc(fmtDate(p.reimbursedDate))}</div>` : ""}
+          </td>
+          <td class="amt">${money(p.cost)}</td>
+        </tr>`;
+    }).join("");
+
+    const overlay = document.createElement("div");
+    overlay.className = "statement-overlay";
+    overlay.innerHTML = `
+      <div class="statement-bar">
+        <button type="button" class="st-back">&#8592; Back</button>
+        <button type="button" class="st-print">Print or save as PDF</button>
+      </div>
+      <div class="statement-doc">
+        <div class="st-head">
+          <div class="st-brand">
+            <div class="st-mark">KC</div>
+            <div>
+              <div class="st-brand-name">Kinsey Cathers</div>
+              <div class="st-brand-sub">Fashion</div>
+            </div>
+          </div>
+          <div class="st-issued">Issued ${esc(fmtDate(todayISO()))}</div>
+        </div>
+        <h1>Statement of Purchases</h1>
+        <p class="st-sub">${esc(subtitle)}</p>
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Product</th><th class="amt">Amount</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+          <tfoot>
+            <tr>
+              <td></td>
+              <td>Total<div class="st-total-sub">${items.length} item${items.length === 1 ? "" : "s"}</div></td>
+              <td class="amt">${money(total)}</td>
+            </tr>
+          </tfoot>
+        </table>
+        <p class="st-foot-note">Amounts paid out of pocket and submitted for reimbursement.</p>
+      </div>`;
+
+    document.body.appendChild(overlay);
+    document.body.classList.add("no-scroll");
+
+    let done = false;
+    let pushed = false;
+    function teardown() {
+      if (done) return;
+      done = true;
+      overlay.remove();
+      document.body.classList.remove("no-scroll");
+      window.removeEventListener("popstate", onPop);
+    }
+    function onPop() { teardown(); }
+    function closeAndUnwind() {
+      if (done) return;
+      window.removeEventListener("popstate", onPop);
+      teardown();
+      if (pushed) history.back();
+    }
+    try { history.pushState({ kcStatement: true }, ""); pushed = true; } catch (e) { /* ignore */ }
+    window.addEventListener("popstate", onPop);
+
+    overlay.querySelector(".st-back").addEventListener("click", closeAndUnwind);
+    overlay.querySelector(".st-print").addEventListener("click", () => window.print());
+  }
+
+  /* ============================================================
      HOURS
      ============================================================ */
   function renderHours() {
@@ -1247,7 +1441,7 @@
   /* ============================================================
      Modal
      ============================================================ */
-  function openModal(title, bodyHTML, { onSave, onDelete } = {}) {
+  function openModal(title, bodyHTML, { onSave, onDelete, saveLabel } = {}) {
     const root = $("#modal-root");
     root.innerHTML = `
       <div class="modal-backdrop">
@@ -1259,7 +1453,7 @@
             <div class="modal-actions">
               ${onDelete ? `<button type="button" class="btn btn-danger-text" id="modal-delete">Delete</button>` : ""}
               <button type="button" class="btn btn-ghost" id="modal-cancel">Cancel</button>
-              <button type="submit" class="btn btn-primary">Save</button>
+              <button type="submit" class="btn btn-primary">${esc(saveLabel || "Save")}</button>
             </div>
           </form>
         </div>
