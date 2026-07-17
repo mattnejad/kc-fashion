@@ -49,6 +49,45 @@
   // In-memory mirror of the user's Firestore data; render code reads this.
   let db = defaultData();
   let userId = null; // signed-in Firebase uid
+
+  // Self-contained styles for the printable statement document (opened in a new
+  // tab on iOS standalone). Colors are literal — no CSS variables — so the doc
+  // needs nothing external and prints correctly offline.
+  const STATEMENT_PRINT_CSS = `
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Georgia, "Times New Roman", serif; color: #1a1a1a;
+      max-width: 720px; margin: 0 auto; padding: 28px 22px 48px; font-size: 15px; line-height: 1.6; }
+    .st-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 26px; }
+    .st-brand { display: flex; align-items: center; gap: 10px; }
+    .st-mark { width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0; border: 1.5px solid #b8975a;
+      color: #b8975a; display: flex; align-items: center; justify-content: center; font-size: 13px; letter-spacing: .5px; }
+    .st-brand-name { font-size: 17px; letter-spacing: 1.5px; text-transform: uppercase; white-space: nowrap; }
+    .st-brand-sub { font-size: 9.5px; letter-spacing: 3px; text-transform: uppercase; color: #b8975a; }
+    .st-issued { font-size: 12.5px; color: #6b6660; font-family: sans-serif; white-space: nowrap; }
+    h1 { font-size: 23px; margin: 0 0 4px; font-weight: 400; }
+    .st-sub { color: #6b6660; margin: 0 0 20px; font-size: 14px; font-family: sans-serif; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e7e3dd; vertical-align: top; }
+    th { font-family: sans-serif; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+      color: #6b6660; border-bottom: 2px solid #1a1a1a; }
+    td.amt, th.amt { text-align: right; white-space: nowrap; }
+    .st-date { white-space: nowrap; color: #6b6660; font-size: 14px; }
+    .st-prod { font-weight: 600; }
+    .st-prod-sub { font-size: 12.5px; color: #6b6660; margin-top: 2px; font-family: sans-serif; }
+    tfoot td { font-weight: 700; font-size: 16.5px; border-top: 2px solid #1a1a1a; border-bottom: none; padding-top: 12px; }
+    .st-total-sub { font-weight: 400; font-size: 12px; color: #6b6660; font-family: sans-serif; margin-top: 2px; }
+    .st-foot-note { margin-top: 24px; font-size: 12.5px; color: #6b6660; font-family: sans-serif; }
+    .st-receipts { margin-top: 34px; border-top: 2px solid #1a1a1a; padding-top: 18px; }
+    .st-receipts-title { font-size: 18px; font-weight: 400; margin: 0 0 12px; }
+    .st-missing-note { font-family: sans-serif; font-size: 12.5px; color: #b26a1e;
+      background: #f7ecdc; border-radius: 8px; padding: 10px 12px; margin: 0 0 16px; }
+    .st-receipt { margin: 0 0 22px; break-inside: avoid; page-break-inside: avoid; }
+    .st-receipt img { width: 100%; max-width: 460px; display: block; border: 1px solid #e7e3dd; border-radius: 8px; }
+    .st-receipt figcaption { font-family: sans-serif; font-size: 12px; color: #6b6660; margin-top: 6px; }
+    .print-hint { margin-top: 30px; font-family: sans-serif; font-size: 13px; color: #6b6660;
+      background: #faf9f7; border: 1px solid #e7e3dd; border-radius: 8px; padding: 12px 14px; }
+    @media print { .print-hint { display: none; } .st-receipts { break-before: page; page-break-before: always; border-top: 0; } }
+  `;
   let unsubscribers = [];
 
   const userDoc = () => firestore.collection("users").doc(userId);
@@ -1315,13 +1354,7 @@
           <td class="amt">${money(p.cost)}</td>
         </tr>`).join("");
 
-    const overlay = document.createElement("div");
-    overlay.className = "statement-overlay";
-    overlay.innerHTML = `
-      <div class="statement-bar">
-        <button type="button" class="st-back">&#8592; Back</button>
-        <button type="button" class="st-print">Print or save as PDF</button>
-      </div>
+    const docInner = `
       <div class="statement-doc">
         <div class="st-head">
           <div class="st-brand">
@@ -1352,6 +1385,15 @@
         ${receiptsSection}
       </div>`;
 
+    const overlay = document.createElement("div");
+    overlay.className = "statement-overlay";
+    overlay.innerHTML = `
+      <div class="statement-bar">
+        <button type="button" class="st-back">&#8592; Back</button>
+        <button type="button" class="st-print">Print or save as PDF</button>
+      </div>
+      ${docInner}`;
+
     document.body.appendChild(overlay);
     document.body.classList.add("no-scroll");
 
@@ -1375,7 +1417,32 @@
     window.addEventListener("popstate", onPop);
 
     overlay.querySelector(".st-back").addEventListener("click", closeAndUnwind);
-    overlay.querySelector(".st-print").addEventListener("click", () => window.print());
+    overlay.querySelector(".st-print").addEventListener("click", () => printStatement(docInner));
+  }
+
+  // iOS home-screen (standalone) apps can't use window.print() — it silently
+  // does nothing. There, open the statement as its own self-contained document
+  // in a normal browser tab, where the share sheet's Print / Save to Files works.
+  // Everywhere else, print the in-app overlay directly.
+  function isStandalone() {
+    return window.navigator.standalone === true ||
+      (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+  }
+
+  function printStatement(docInner) {
+    if (!isStandalone()) { window.print(); return; }
+    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Statement of Purchases</title>
+<style>${STATEMENT_PRINT_CSS}</style></head>
+<body>${docInner}
+<p class="print-hint">Use the share button, then <b>Print</b> or <b>Save to Files</b> to keep a PDF.</p>
+<script>window.addEventListener("load",function(){setTimeout(function(){try{window.print();}catch(e){}},450);});<\/script>
+</body></html>`;
+    const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+    const w = window.open(url, "_blank");
+    if (!w) window.location.href = url; // popup blocked → same tab (Back returns)
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
   /* ============================================================
