@@ -86,7 +86,18 @@
     .st-receipt figcaption { font-family: sans-serif; font-size: 12px; color: #6b6660; margin-top: 6px; }
     .print-hint { margin-top: 30px; font-family: sans-serif; font-size: 13px; color: #6b6660;
       background: #faf9f7; border: 1px solid #e7e3dd; border-radius: 8px; padding: 12px 14px; }
-    @media print { .print-hint { display: none; } .st-receipts { break-before: page; page-break-before: always; border-top: 0; } }
+    @media print {
+      body { padding: 10px 20px 0; line-height: 1.4; }
+      h1 { margin-bottom: 2px; }
+      .st-head { margin-bottom: 12px; }
+      .st-sub { margin-bottom: 12px; }
+      th, td { padding: 4px 8px; }
+      tfoot td { padding-top: 8px; }
+      .st-foot-note { margin-top: 10px; break-inside: avoid; page-break-inside: avoid; }
+      .print-hint { display: none; }
+      .st-receipts { break-before: page; page-break-before: always; border-top: 0; }
+      .st-receipt { break-inside: avoid; page-break-inside: avoid; }
+    }
   `;
   let unsubscribers = [];
 

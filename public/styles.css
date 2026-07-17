@@ -364,6 +364,15 @@ body {
   .statement-overlay { position: static; overflow: visible; }
   .statement-bar { display: none; }
   .statement-doc { max-width: none; padding: 0; }
+  /* Tighten vertical rhythm so a borderline statement doesn't push a single
+     trailing line (the footnote) onto a near-empty second page. */
+  .statement-doc { line-height: 1.4; }
+  .statement-doc h1 { margin-bottom: 2px; }
+  .st-head { margin-bottom: 12px; }
+  .st-sub { margin-bottom: 12px; }
+  .statement-doc th, .statement-doc td { padding: 4px 8px; }
+  .statement-doc tfoot td { padding-top: 8px; }
+  .st-foot-note { margin-top: 10px; break-inside: avoid; page-break-inside: avoid; }
   /* Keep each receipt whole, and start the receipts on their own page. */
   .st-receipts { break-before: page; page-break-before: always; border-top: 0; }
   .st-receipt { break-inside: avoid; page-break-inside: avoid; }
