@@ -72,7 +72,8 @@
       color: #6b6660; border-bottom: 2px solid #1a1a1a; }
     td.amt, th.amt { text-align: right; white-space: nowrap; }
     .st-date { white-space: nowrap; color: #6b6660; font-size: 14px; }
-    .st-prod { font-weight: 600; }
+    .st-prod { font-weight: 400; }
+    .st-brand-col { color: #6b6660; }
     .st-prod-sub { font-size: 12.5px; color: #6b6660; margin-top: 2px; font-family: sans-serif; }
     tfoot td { font-weight: 700; font-size: 16.5px; border-top: 2px solid #1a1a1a; border-bottom: none; padding-top: 12px; }
     .st-total-sub { font-weight: 400; font-size: 12px; color: #6b6660; font-family: sans-serif; margin-top: 2px; }
@@ -1353,15 +1354,15 @@
       </div>`;
 
     // The statement deliberately omits store and sales associate — only the
-    // brand is disclosed alongside the product.
+    // brand is disclosed, in its own column.
     const rows = items.map((p) => `
         <tr>
           <td class="st-date">${esc(fmtDate(p.date))}</td>
           <td>
             <div class="st-prod">${esc(p.product)}</div>
-            ${p.brand ? `<div class="st-prod-sub">${esc(p.brand)}</div>` : ""}
             ${p.reimbursed ? `<div class="st-prod-sub">Reimbursed ${esc(fmtDate(p.reimbursedDate))}</div>` : ""}
           </td>
+          <td class="st-brand-col">${esc(p.brand || "")}</td>
           <td class="amt">${money(p.cost)}</td>
         </tr>`).join("");
 
@@ -1381,13 +1382,14 @@
         <p class="st-sub">${esc(subtitle)}</p>
         <table>
           <thead>
-            <tr><th>Date</th><th>Product</th><th class="amt">Amount</th></tr>
+            <tr><th>Date</th><th>Product</th><th>Brand</th><th class="amt">Amount</th></tr>
           </thead>
           <tbody>${rows}</tbody>
           <tfoot>
             <tr>
               <td></td>
               <td>Total<div class="st-total-sub">${items.length} item${items.length === 1 ? "" : "s"}</div></td>
+              <td></td>
               <td class="amt">${money(total)}</td>
             </tr>
           </tfoot>

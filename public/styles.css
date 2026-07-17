@@ -296,7 +296,8 @@ body {
 }
 .statement-doc td.amt, .statement-doc th.amt { text-align: right; white-space: nowrap; }
 .st-date { white-space: nowrap; color: var(--ink-soft); font-size: 14px; }
-.st-prod { font-weight: 600; }
+.st-prod { font-weight: 400; }
+.st-brand-col { color: var(--ink-soft); }
 .st-prod-sub {
   font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; font-family: var(--font-sans);
 }
