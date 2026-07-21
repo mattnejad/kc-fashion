@@ -37,12 +37,18 @@
     stores: ["Chanel", "Louis Vuitton", "Hermès", "Gucci", "Dior", "Saint Laurent", "Bottega Veneta"],
     brands: ["Chanel", "Louis Vuitton", "Hermès", "Gucci", "Dior", "Saint Laurent", "Bottega Veneta", "Prada", "Celine", "Loro Piana"],
     paymentMethods: [], // [{id, name, cashbackPercent}]
+    // Public "Finds" portfolio on the sourcing website. Purchases publish by
+    // default; `enabled` is the master switch and `minCost` is a private filter
+    // (never shown publicly — only decides which finds appear).
+    portfolio: { enabled: true, minCost: 0 },
   });
 
   const defaultData = () => ({
     contacts: [],
     purchases: [],
     hours: [],
+    clients: [],   // people/entities on the paying side (employer + clients)
+    payments: [],  // money received, each allocated across outstanding items
     settings: defaultSettings(),
   });
 
@@ -212,6 +218,8 @@
     contacts: { q: "", sort: "name" },
     purchases: { filter: "outstanding", q: "", sort: "recent" },
     hours: { filter: "outstanding" },
+    clients: { q: "", sort: "name", filter: "all" },
+    payments: { sort: "recent" },
   };
 
   const viewEl = $("#view");
@@ -274,6 +282,12 @@
           <div class="stat-value green">${money(compensation)}</div>
         </div>
       </div>
+
+      ${db.payments.length ? `<div class="stat full" style="margin-top:12px;">
+        <div class="stat-label">Unallocated funds</div>
+        <div class="stat-value ${totalUnallocated() > 0.001 ? "amber" : "green"}">${money(totalUnallocated())}</div>
+        <p class="hint" style="margin-top:4px;">Received but not yet matched to an item. See the Payments tab.</p>
+      </div>` : ""}
 
       <div class="section-label">Compensation breakdown</div>
       <div class="stat full">
@@ -916,6 +930,24 @@
         <input id="f-reimbursed" type="checkbox" ${p.reimbursed ? "checked" : ""} />
         <label for="f-reimbursed">Already reimbursed</label>
       </div>
+      <div class="portfolio-block" style="margin-top:14px; padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:var(--surface-2);">
+        <div class="check-field" style="margin:0;">
+          <input id="f-portfolio" type="checkbox" ${p.portfolioHidden ? "" : "checked"} />
+          <label for="f-portfolio">Show on my public <strong>Finds</strong> portfolio</label>
+        </div>
+        <p class="hint" style="margin:6px 0 0;">Publishes only the photo, brand, item name${""}
+          &amp; date to the website — never the cost, client, or receipt.</p>
+        <div id="f-portfolio-opts" style="margin-top:10px; ${p.portfolioHidden ? "display:none;" : ""}">
+          <div class="field" style="margin-bottom:10px;">
+            <label>Display name on site <span class="hint" style="text-transform:none; letter-spacing:0;">(optional — defaults to Product)</span></label>
+            <input id="f-portfolio-name" type="text" value="${esc(p.portfolioName || "")}" placeholder="${esc(p.product || "e.g. Classic Flap Bag")}" />
+          </div>
+          <div class="check-field" style="margin:0;">
+            <input id="f-portfolio-hidedate" type="checkbox" ${p.portfolioHideDate ? "checked" : ""} />
+            <label for="f-portfolio-hidedate">Hide the date on the site</label>
+          </div>
+        </div>
+      </div>
     `, {
       onSave: () => {
         const product = $("#f-product").value.trim();
@@ -941,6 +973,10 @@
           reimbursed,
           reimbursedDate: reimbursed ? (p.reimbursedDate || todayISO()) : "",
           createdAt: p.createdAt || Date.now(),
+          // Public "Finds" portfolio controls (see syncPortfolio).
+          portfolioHidden: !$("#f-portfolio").checked,
+          portfolioHideDate: $("#f-portfolio-hidedate").checked,
+          portfolioName: $("#f-portfolio-name").value.trim(),
         };
         // Firestore rejects documents over 1 MiB; fail loudly rather than
         // silently losing the purchase.
@@ -949,11 +985,12 @@
           return false;
         }
         upsert("purchases", rec);
+        syncPortfolio(rec); // publish/unpublish on the public site
         toast(existing ? "Purchase updated" : "Purchase added");
         renderPurchases();
         return true;
       },
-      onDelete: existing ? () => { remove("purchases", p.id); toast("Purchase deleted"); renderPurchases(); } : null,
+      onDelete: existing ? () => { remove("purchases", p.id); removePortfolio(p.id); toast("Purchase deleted"); renderPurchases(); } : null,
     });
 
     const updateCashbackPreview = () => {
@@ -974,6 +1011,11 @@
       if (contactStore && !storeSel.value) addOptionAndSelect(storeSel, contactStore);
     });
     updateCashbackPreview();
+
+    // Show the per-item portfolio options only when it's set to appear on the site.
+    $("#f-portfolio").addEventListener("change", (e) => {
+      $("#f-portfolio-opts").style.display = e.target.checked ? "" : "none";
+    });
 
     photoField = setupImageDrop("photo", p.photo, { maxDim: 900, budget: 320000 });
     receiptField = setupImageDrop("receipt", p.receipt, { maxDim: 1600, budget: 480000, redactable: true });
@@ -1459,6 +1501,459 @@
   }
 
   /* ============================================================
+     CLIENTS & PAYMENTS
+     A "client" is anyone on the paying side — the employer (who pays via
+     reimbursements) or a real client (who buys, where you'd profit). A client
+     is "potential" until money has come in from them. A "payment" is money
+     received, allocated across outstanding purchases; whatever isn't matched to
+     an item stays as unallocated funds (a record, not lost).
+     ============================================================ */
+  const paymentAllocated = (pmt) =>
+    (pmt.allocations || []).reduce((s, a) => s + (Number(a.amount) || 0), 0);
+  const paymentUnallocated = (pmt) => (Number(pmt.amount) || 0) - paymentAllocated(pmt);
+  const totalUnallocated = () => db.payments.reduce((s, p) => s + paymentUnallocated(p), 0);
+  const totalReceived = () => db.payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const clientName = (id) => { const c = db.clients.find((x) => x.id === id); return c ? c.name : ""; };
+  const clientHasActivity = (c) => db.payments.some((p) => p.clientId === c.id);
+  const clientStatus = (c) => (clientHasActivity(c) || c.status === "active") ? "active" : "potential";
+  const clientReceived = (c) =>
+    db.payments.filter((p) => p.clientId === c.id).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+
+  /* ---------- Clients ---------- */
+  function filterClients() {
+    const { q, sort, filter } = ui.clients;
+    let list = db.clients.slice();
+    if (filter === "potential") list = list.filter((c) => clientStatus(c) === "potential");
+    if (filter === "active") list = list.filter((c) => clientStatus(c) === "active");
+    if (q.trim()) {
+      const needle = q.toLowerCase();
+      list = list.filter((c) =>
+        [c.name, c.email, c.phone, c.notes].filter(Boolean).join(" ").toLowerCase().includes(needle));
+    }
+    list.sort((a, b) => sort === "recent"
+      ? (b.createdAt || 0) - (a.createdAt || 0)
+      : (a.name || "").localeCompare(b.name || ""));
+    return list;
+  }
+
+  function renderClients() {
+    const { q, sort, filter } = ui.clients;
+    const list = filterClients();
+    viewEl.innerHTML = `
+      <h2 class="view-title">Clients</h2>
+      <p class="hint" style="margin:-4px 0 12px;">Everyone who pays you — your employer and any clients. A client is <strong>potential</strong> until money has come in.</p>
+      <div class="toolbar">
+        <div class="search"><span>&#9906;</span>
+          <input id="client-search" type="search" placeholder="Search clients…" value="${esc(q)}" /></div>
+        <select id="client-sort" class="select" aria-label="Sort">
+          <option value="name" ${sort === "name" ? "selected" : ""}>Name</option>
+          <option value="recent" ${sort === "recent" ? "selected" : ""}>Newest</option>
+        </select>
+      </div>
+      <div class="segment">
+        <button data-f="all" class="${filter === "all" ? "active" : ""}">All</button>
+        <button data-f="active" class="${filter === "active" ? "active" : ""}">Clients</button>
+        <button data-f="potential" class="${filter === "potential" ? "active" : ""}">Potential</button>
+      </div>
+      <div id="client-list">
+        ${list.length ? list.map(clientCard).join("")
+          : emptyState("&#128101;", db.clients.length ? "No matches." : "No clients yet. Tap + to add one (like your employer).")}
+      </div>`;
+    const s = $("#client-search");
+    s.addEventListener("input", () => {
+      ui.clients.q = s.value;
+      const f = filterClients();
+      $("#client-list").innerHTML = f.length ? f.map(clientCard).join("") : emptyState("&#128101;", "No matches.");
+      bindClientCards();
+    });
+    $("#client-sort").addEventListener("change", (e) => { ui.clients.sort = e.target.value; renderClients(); });
+    viewEl.querySelectorAll(".segment button").forEach((b) =>
+      b.addEventListener("click", () => { ui.clients.filter = b.dataset.f; renderClients(); }));
+    bindClientCards();
+  }
+
+  function clientCard(c) {
+    const status = clientStatus(c);
+    const received = clientReceived(c);
+    const links = [];
+    if (c.phone) {
+      links.push(`<a class="link-btn" href="tel:${esc(c.phone)}">Call</a>`);
+      links.push(`<a class="link-btn" href="sms:${esc(c.phone)}">Text</a>`);
+    }
+    if (c.email) links.push(`<a class="link-btn" href="mailto:${esc(c.email)}">Email</a>`);
+    return `
+      <div class="card card-clickable" data-id="${c.id}">
+        <div class="card-row">
+          <div class="avatar">${esc(initials(c.name))}</div>
+          <div class="card-main">
+            <div class="card-title">${esc(c.name)}</div>
+            <div class="card-sub" style="margin-top:3px;">
+              <span class="chip ${status === "active" ? "green" : "amber"}">${status === "active" ? "Client" : "Potential"}</span>
+              ${received > 0 ? ` <span>${money(received)} received</span>` : ""}
+            </div>
+            ${c.notes ? `<div class="card-notes">${esc(c.notes)}</div>` : ""}
+            ${links.length ? `<div class="contact-links">${links.join("")}</div>` : ""}
+          </div>
+          <div class="card-actions"><button class="mini-btn" data-act="edit">Edit</button></div>
+        </div>
+      </div>`;
+  }
+
+  function bindClientCards() {
+    viewEl.querySelectorAll(".card[data-id]").forEach((card) => {
+      const c = db.clients.find((x) => x.id === card.dataset.id);
+      if (!c) return;
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".mini-btn, .link-btn")) return;
+        openClientView(c);
+      });
+      card.querySelector('[data-act="edit"]')?.addEventListener("click", () => openClientForm(c));
+    });
+  }
+
+  function openClientForm(existing) {
+    const c = existing || {};
+    const locked = existing && clientHasActivity(c); // active because payments exist
+    openModal(existing ? "Edit client" : "New client", `
+      <div class="field"><label>Name *</label>
+        <input id="f-cname" type="text" value="${esc(c.name || "")}" placeholder="e.g. Acme Boutique (employer)" /></div>
+      <div class="field"><label>Status</label>
+        <select id="f-cstatus" ${locked ? "disabled" : ""}>
+          <option value="potential" ${clientStatus(c) !== "active" ? "selected" : ""}>Potential</option>
+          <option value="active" ${clientStatus(c) === "active" ? "selected" : ""}>Client (has transacted)</option>
+        </select>
+        ${locked ? `<p class="hint" style="margin-top:6px;">Automatically a client — you've recorded a payment from them.</p>` : ""}
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Phone</label>
+          <input id="f-cphone" type="tel" value="${esc(c.phone || "")}" placeholder="(555) 123-4567" /></div>
+        <div class="field"><label>Email</label>
+          <input id="f-cemail" type="email" value="${esc(c.email || "")}" placeholder="name@email.com" /></div>
+      </div>
+      <div class="field"><label>Notes</label>
+        <textarea id="f-cnotes" placeholder="What they're looking for, how you know them…">${esc(c.notes || "")}</textarea></div>
+    `, {
+      onSave: () => {
+        const name = $("#f-cname").value.trim();
+        if (!name) { toast("Name is required"); return false; }
+        const rec = {
+          id: c.id || uid(),
+          name,
+          status: $("#f-cstatus").value === "active" ? "active" : "potential",
+          phone: $("#f-cphone").value.trim(),
+          email: $("#f-cemail").value.trim(),
+          notes: $("#f-cnotes").value.trim(),
+          createdAt: c.createdAt || Date.now(),
+        };
+        upsert("clients", rec);
+        toast(existing ? "Client updated" : "Client added");
+        renderClients();
+        return true;
+      },
+      onDelete: (existing && !clientHasActivity(c))
+        ? () => { remove("clients", c.id); toast("Client deleted"); renderClients(); }
+        : null,
+    });
+  }
+
+  function openClientView(c) {
+    const pmts = db.payments.filter((p) => p.clientId === c.id)
+      .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    const received = pmts.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+    const status = clientStatus(c);
+    const links = [];
+    if (c.phone) {
+      links.push(`<a class="link-btn" href="tel:${esc(c.phone)}">Call</a>`);
+      links.push(`<a class="link-btn" href="sms:${esc(c.phone)}">Text</a>`);
+    }
+    if (c.email) links.push(`<a class="link-btn" href="mailto:${esc(c.email)}">Email</a>`);
+
+    const rows = pmts.length ? pmts.map((p) => `
+      <div class="mini-row">
+        <div>
+          <div class="mini-row-title">${money(p.amount)}</div>
+          <div class="mini-row-sub">${esc(fmtDate(p.date))} · ${(p.allocations || []).length} item${(p.allocations || []).length === 1 ? "" : "s"}</div>
+        </div>
+        <div class="mini-row-right">
+          ${paymentUnallocated(p) > 0.001 ? `<span class="chip amber">${money(paymentUnallocated(p))} unallocated</span>` : `<span class="chip green">Allocated</span>`}
+        </div>
+      </div>`).join("") : `<p class="hint">No payments recorded from this client yet.</p>`;
+
+    const root = $("#modal-root");
+    root.innerHTML = `
+      <div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-grip"></div>
+        <h2>${esc(c.name)}</h2>
+        <div class="card-sub" style="margin-bottom:10px;">
+          <span class="chip ${status === "active" ? "green" : "amber"}">${status === "active" ? "Client" : "Potential"}</span>
+        </div>
+        ${c.notes ? `<div class="card-notes" style="margin-bottom:12px;">${esc(c.notes)}</div>` : ""}
+        ${links.length ? `<div class="contact-links" style="margin-bottom:18px;">${links.join("")}</div>` : ""}
+        <div class="section-label" style="margin:0 2px 8px;">Payments received</div>
+        ${rows}
+        <div class="stat full" style="margin-top:14px;">
+          <div class="stat-label">Total received</div>
+          <div class="stat-value">${money(received)}</div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="view-close">Close</button>
+          <button type="button" class="btn btn-primary" id="view-edit">Edit</button>
+        </div>
+      </div></div>`;
+    const close = () => (root.innerHTML = "");
+    $(".modal-backdrop", root).addEventListener("click", (e) => { if (e.target.classList.contains("modal-backdrop")) close(); });
+    $("#view-close", root).addEventListener("click", close);
+    $("#view-edit", root).addEventListener("click", () => { close(); openClientForm(c); });
+  }
+
+  // Payer picklist (clients) with inline "add new".
+  function clientSelectOptions(selectedId) {
+    const opts = db.clients.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+      .map((c) => `<option value="${esc(c.id)}" ${c.id === selectedId ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+    return `<option value="">— select —</option>${opts}<option value="__add__">+ Add new client…</option>`;
+  }
+  function handleClientSelectChange(selectEl) {
+    if (selectEl.value !== "__add__") return;
+    const name = prompt("Add a new client (e.g. your employer):");
+    if (!name || !name.trim()) { selectEl.value = ""; return; }
+    const clean = name.trim();
+    let match = db.clients.find((c) => c.name.toLowerCase() === clean.toLowerCase());
+    if (!match) {
+      match = { id: uid(), name: clean, status: "potential", phone: "", email: "", notes: "", createdAt: Date.now() };
+      upsert("clients", match);
+    }
+    const addOpt = selectEl.querySelector('option[value="__add__"]');
+    let opt = [...selectEl.options].find((o) => o.value === match.id);
+    if (!opt) { opt = document.createElement("option"); opt.value = match.id; opt.textContent = match.name; selectEl.insertBefore(opt, addOpt); }
+    selectEl.value = match.id;
+  }
+
+  /* ---------- Payments ---------- */
+  function renderPayments() {
+    const list = db.payments.slice().sort((a, b) => ui.payments.sort === "amount"
+      ? (Number(b.amount) || 0) - (Number(a.amount) || 0)
+      : ((b.date || "").localeCompare(a.date || "") || (b.createdAt || 0) - (a.createdAt || 0)));
+    const un = totalUnallocated();
+    viewEl.innerHTML = `
+      <h2 class="view-title">Payments</h2>
+      <div class="stat-grid" style="margin-bottom:8px;">
+        <div class="stat">
+          <div class="stat-label">Received to date</div>
+          <div class="stat-value green">${money(totalReceived())}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Unallocated funds</div>
+          <div class="stat-value ${un > 0.001 ? "amber" : ""}">${money(un)}</div>
+        </div>
+      </div>
+      <p class="hint" style="margin:0 2px 12px;">Unallocated = money received that you haven't matched to a specific item yet.</p>
+      ${db.payments.length ? `<div class="toolbar" style="justify-content:flex-end;">
+        <select id="payment-sort" class="select" aria-label="Sort">
+          <option value="recent" ${ui.payments.sort === "recent" ? "selected" : ""}>Newest</option>
+          <option value="amount" ${ui.payments.sort === "amount" ? "selected" : ""}>Largest</option>
+        </select></div>` : ""}
+      <div id="payment-list">
+        ${list.length ? list.map(paymentCard).join("")
+          : emptyState("&#128181;", "No payments yet. Tap + to record one from your employer.")}
+      </div>`;
+    $("#payment-sort")?.addEventListener("change", (e) => { ui.payments.sort = e.target.value; renderPayments(); });
+    bindPaymentCards();
+  }
+
+  function paymentCard(p) {
+    const un = paymentUnallocated(p);
+    const n = (p.allocations || []).length;
+    const tag = un > 0.001 ? `<span class="chip amber">${money(un)} unallocated</span>`
+      : (un < -0.001 ? `<span class="chip amber">over by ${money(-un)}</span>`
+        : `<span class="chip green">Fully allocated</span>`);
+    return `
+      <div class="card card-clickable" data-id="${p.id}">
+        <div class="card-row">
+          <div class="card-main">
+            <div class="card-title">${money(p.amount)}</div>
+            <div class="card-sub">${esc([fmtDate(p.date), clientName(p.clientId)].filter(Boolean).join(" · "))}</div>
+            <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+              <span class="chip">${n} item${n === 1 ? "" : "s"}</span>
+              ${tag}
+            </div>
+            ${p.note ? `<div class="card-notes">${esc(p.note)}</div>` : ""}
+          </div>
+          <div class="card-actions"><button class="mini-btn" data-act="edit">Edit</button></div>
+        </div>
+      </div>`;
+  }
+
+  function bindPaymentCards() {
+    viewEl.querySelectorAll(".card[data-id]").forEach((card) => {
+      const p = db.payments.find((x) => x.id === card.dataset.id);
+      if (!p) return;
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".mini-btn")) return;
+        openPaymentView(p);
+      });
+      card.querySelector('[data-act="edit"]')?.addEventListener("click", () => openPaymentForm(p));
+    });
+  }
+
+  function openPaymentForm(existing) {
+    const p = existing || {};
+    const allocatedIds = new Set((p.allocations || []).map((a) => a.purchaseId));
+
+    // Candidates: outstanding purchases, plus any already on THIS payment.
+    const candidates = db.purchases
+      .filter((x) => !x.reimbursed || (existing && x.paymentId === p.id))
+      .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+    const pickRows = candidates.map((x) => `
+      <label class="pick-row">
+        <input type="checkbox" data-cost="${Number(x.cost) || 0}" value="${esc(x.id)}" ${allocatedIds.has(x.id) ? "checked" : ""} />
+        <span class="pick-main">
+          <span class="pick-title">${esc(x.product)}</span>
+          <span class="pick-sub">${esc([fmtDate(x.date), x.brand || x.store].filter(Boolean).join(" · "))}</span>
+        </span>
+        <span class="pick-amt">${money(x.cost)}</span>
+      </label>`).join("");
+
+    openModal(existing ? "Edit payment" : "Record payment", `
+      <div class="field-row">
+        <div class="field"><label>Amount *</label>
+          <input id="f-pamount" type="number" inputmode="decimal" step="0.01" value="${esc(p.amount ?? "")}" placeholder="0.00" /></div>
+        <div class="field"><label>Date</label>
+          <input id="f-pdate" type="date" value="${esc(p.date || todayISO())}" /></div>
+      </div>
+      <div class="field"><label>From</label>
+        <select id="f-pclient">${clientSelectOptions(p.clientId || "")}</select></div>
+      <div class="field"><label>What this payment covers</label>
+        ${candidates.length
+          ? `<div class="pick-list">${pickRows}</div>`
+          : `<p class="hint">No outstanding items to match. You can still record the payment — it'll show as unallocated.</p>`}
+      </div>
+      <div class="alloc-summary" id="alloc-summary"></div>
+      <div class="field"><label>Note (optional)</label>
+        <textarea id="f-pnote" placeholder="Reference #, or anything to remember…">${esc(p.note || "")}</textarea></div>
+    `, {
+      saveLabel: existing ? "Save" : "Record payment",
+      onSave: () => {
+        const raw = $("#f-pamount").value;
+        const amount = Number(raw);
+        if (raw === "" || isNaN(amount) || amount <= 0) { toast("Enter a valid amount"); return false; }
+        const allocations = [...document.querySelectorAll(".pick-row input:checked")]
+          .map((i) => ({ purchaseId: i.value, amount: Number(i.dataset.cost) || 0 }));
+        const rec = {
+          id: p.id || uid(),
+          amount,
+          date: $("#f-pdate").value || todayISO(),
+          clientId: $("#f-pclient").value || "",
+          note: $("#f-pnote").value.trim(),
+          allocations,
+          createdAt: p.createdAt || Date.now(),
+        };
+        savePayment(rec, existing ? p : null);
+        toast(existing ? "Payment updated" : "Payment recorded");
+        renderPayments();
+        return true;
+      },
+      onDelete: existing ? () => { deletePayment(p); toast("Payment deleted"); renderPayments(); } : null,
+    });
+
+    $("#f-pclient").addEventListener("change", (e) => handleClientSelectChange(e.target));
+    const updateSummary = () => {
+      const amount = Number($("#f-pamount").value) || 0;
+      const allocated = [...document.querySelectorAll(".pick-row input:checked")]
+        .reduce((s, i) => s + (Number(i.dataset.cost) || 0), 0);
+      const un = amount - allocated;
+      let cls, msg;
+      if (un > 0.001) { cls = "warn-amber"; msg = `${money(un)} unallocated`; }
+      else if (un < -0.001) { cls = "warn-red"; msg = `Over by ${money(-un)}`; }
+      else { cls = "ok-green"; msg = "Fully allocated"; }
+      $("#alloc-summary").innerHTML =
+        `<div class="alloc-line"><span>Allocated ${money(allocated)} of ${money(amount)}</span><span class="alloc-tag ${cls}">${msg}</span></div>`;
+    };
+    $("#f-pamount").addEventListener("input", updateSummary);
+    document.querySelectorAll(".pick-row input").forEach((i) => i.addEventListener("change", updateSummary));
+    updateSummary();
+  }
+
+  // Apply a payment: reimburse the purchases it covers and link them to it.
+  function savePayment(rec, prev) {
+    const nowIds = new Set(rec.allocations.map((a) => a.purchaseId));
+    rec.allocations.forEach((a) => {
+      const pur = db.purchases.find((x) => x.id === a.purchaseId);
+      if (pur) {
+        pur.reimbursed = true;
+        pur.reimbursedDate = rec.date || todayISO();
+        pur.paymentId = rec.id;
+        upsert("purchases", pur);
+      }
+    });
+    // On edit: items removed from this payment go back to outstanding.
+    if (prev) {
+      (prev.allocations || []).forEach((a) => {
+        if (!nowIds.has(a.purchaseId)) {
+          const pur = db.purchases.find((x) => x.id === a.purchaseId);
+          if (pur && pur.paymentId === rec.id) {
+            pur.reimbursed = false; pur.reimbursedDate = ""; pur.paymentId = "";
+            upsert("purchases", pur);
+          }
+        }
+      });
+    }
+    upsert("payments", rec);
+  }
+
+  function deletePayment(p) {
+    (p.allocations || []).forEach((a) => {
+      const pur = db.purchases.find((x) => x.id === a.purchaseId);
+      if (pur && pur.paymentId === p.id) {
+        pur.reimbursed = false; pur.reimbursedDate = ""; pur.paymentId = "";
+        upsert("purchases", pur);
+      }
+    });
+    remove("payments", p.id);
+  }
+
+  // Read-only payment detail — the record to reference or send the employer.
+  function openPaymentView(p) {
+    const un = paymentUnallocated(p);
+    const rows = (p.allocations || []).map((a) => {
+      const pur = db.purchases.find((x) => x.id === a.purchaseId);
+      const title = pur ? pur.product : "(deleted item)";
+      const sub = pur ? [fmtDate(pur.date), pur.brand || ""].filter(Boolean).join(" · ") : "";
+      return `
+        <div class="mini-row">
+          <div>
+            <div class="mini-row-title">${esc(title)}</div>
+            ${sub ? `<div class="mini-row-sub">${esc(sub)}</div>` : ""}
+          </div>
+          <div class="mini-row-right"><div class="amount">${money(a.amount)}</div></div>
+        </div>`;
+    }).join("") || `<p class="hint">Nothing matched to this payment yet — it's all unallocated.</p>`;
+
+    const root = $("#modal-root");
+    root.innerHTML = `
+      <div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-grip"></div>
+        <h2>${money(p.amount)}</h2>
+        <div class="card-sub" style="margin-bottom:14px;">${esc([fmtDate(p.date), clientName(p.clientId)].filter(Boolean).join(" · "))}</div>
+        ${p.note ? `<div class="card-notes" style="margin-bottom:14px;">${esc(p.note)}</div>` : ""}
+        <div class="section-label" style="margin:0 2px 8px;">Allocated to</div>
+        ${rows}
+        <div class="alloc-summary" style="margin-top:14px;">
+          <div class="alloc-line"><span>Allocated ${money(paymentAllocated(p))} of ${money(p.amount)}</span>
+            <span class="alloc-tag ${un > 0.001 ? "warn-amber" : (un < -0.001 ? "warn-red" : "ok-green")}">${un > 0.001 ? money(un) + " unallocated" : (un < -0.001 ? "over by " + money(-un) : "Fully allocated")}</span></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="view-close">Close</button>
+          <button type="button" class="btn btn-primary" id="view-edit">Edit</button>
+        </div>
+      </div></div>`;
+    const close = () => (root.innerHTML = "");
+    $(".modal-backdrop", root).addEventListener("click", (e) => { if (e.target.classList.contains("modal-backdrop")) close(); });
+    $("#view-close", root).addEventListener("click", close);
+    $("#view-edit", root).addEventListener("click", () => { close(); openPaymentForm(p); });
+  }
+
+  /* ============================================================
      HOURS
      ============================================================ */
   function renderHours() {
@@ -1595,6 +2090,73 @@
       .doc(id)
       .delete()
       .catch((e) => console.error("Sync error", e));
+  }
+
+  /* ============================================================
+     Public portfolio ("Finds" on the sourcing website)
+     ------------------------------------------------------------
+     A curated, PUBLIC-READABLE mirror of chosen purchases. Only the
+     display-safe fields ever leave the app — image, brand, item name, and
+     (optionally) the date. Cost, client, receipt, payment and notes are never
+     written here. Lives in a top-level `portfolio` collection so the website
+     can read it without authentication, while private data under
+     `users/{uid}/…` stays locked to this account.
+     ============================================================ */
+  const portfolioCol = () => firestore.collection("portfolio");
+
+  // A purchase appears on the site when the portfolio is enabled, the item
+  // isn't individually hidden, it has a photo to show, and it clears the
+  // private minimum-cost filter.
+  function portfolioQualifies(p) {
+    const s = db.settings.portfolio || {};
+    if (s.enabled === false) return false;
+    if (p.portfolioHidden) return false;
+    if (!p.photo) return false;
+    if ((Number(p.cost) || 0) < (Number(s.minCost) || 0)) return false;
+    return true;
+  }
+
+  // The exact, minimal shape published to the public feed.
+  function portfolioEntry(p) {
+    return {
+      id: p.id,
+      name: (p.portfolioName && p.portfolioName.trim()) || p.product || "",
+      brand: p.brand || "",
+      // Empty string means "don't show a date" (hidden per-item). We never
+      // publish the real date when it's hidden, so it can't leak via the feed.
+      date: p.portfolioHideDate ? "" : (p.date || ""),
+      photo: p.photo || "",
+      sort: p.createdAt || 0, // opaque ordering key (log time, not the buy date)
+      updatedAt: Date.now(),
+    };
+  }
+
+  // Publish or unpublish a single purchase based on whether it qualifies.
+  function syncPortfolio(p) {
+    if (!userId || !p || !p.id) return;
+    if (portfolioQualifies(p)) {
+      portfolioCol()
+        .doc(p.id)
+        .set(portfolioEntry(p))
+        .catch((e) => console.error("Portfolio sync error", e));
+    } else {
+      portfolioCol().doc(p.id).delete().catch(() => {});
+    }
+  }
+
+  function removePortfolio(id) {
+    if (!userId || !id) return;
+    portfolioCol().doc(id).delete().catch(() => {});
+  }
+
+  // Re-evaluate every purchase — used after the portfolio settings change.
+  function resyncPortfolio() {
+    if (!userId) return;
+    db.purchases.forEach(syncPortfolio);
+  }
+
+  function portfolioLiveCount() {
+    return db.purchases.filter(portfolioQualifies).length;
   }
 
   /* ============================================================
@@ -1825,6 +2387,7 @@
       to this account, stored securely in the cloud, and syncs across your devices.
       It also works offline and catches up when you reconnect.</p>
       <div class="modal-actions" style="flex-direction:column; gap:10px;">
+        <button type="button" class="btn btn-ghost" id="m-portfolio">Public portfolio (Finds)</button>
         <button type="button" class="btn btn-ghost" id="m-stores">Manage stores</button>
         <button type="button" class="btn btn-ghost" id="m-brands">Manage brands</button>
         <button type="button" class="btn btn-ghost" id="m-payments">Manage payment methods</button>
@@ -1848,6 +2411,7 @@
 
     const close = () => (root.innerHTML = "");
     $("#m-close", root).addEventListener("click", close);
+    $("#m-portfolio", root).addEventListener("click", openPortfolioManager);
     $("#m-stores", root).addEventListener("click", openStoreManager);
     $("#m-brands", root).addEventListener("click", openBrandManager);
     $("#m-payments", root).addEventListener("click", openPaymentManager);
@@ -1859,6 +2423,39 @@
         close();
         auth.signOut();
       }
+    });
+  }
+
+  function openPortfolioManager() {
+    const s = db.settings.portfolio || (db.settings.portfolio = { enabled: true, minCost: 0 });
+    openModal("Public portfolio (Finds)", `
+      <p class="hint">Chosen purchases appear as <strong>Finds</strong> on your sourcing
+      website. Only the photo, brand, item name &amp; date are published — never the
+      cost, client, or receipt. Each purchase publishes by default; uncheck
+      &ldquo;Show on my public Finds portfolio&rdquo; on any item to hide it.</p>
+      <div class="check-field" style="margin-top:12px;">
+        <input id="pf-enabled" type="checkbox" ${s.enabled === false ? "" : "checked"} />
+        <label for="pf-enabled">Show my Finds portfolio on the website</label>
+      </div>
+      <div class="field" style="margin-top:14px;">
+        <label>Only publish finds costing at least</label>
+        <input id="pf-mincost" type="number" inputmode="decimal" step="1" min="0"
+          value="${esc(s.minCost || "")}" placeholder="0 (no minimum)" />
+        <p class="hint" style="margin-top:6px;">A private filter, just for you — the price
+          is never shown on the site. Leave at 0 to publish everything.</p>
+      </div>
+      <p class="hint" id="pf-count" style="margin-top:14px;">${portfolioLiveCount()} find(s) currently live.</p>
+    `, {
+      saveLabel: "Save & sync",
+      onSave: () => {
+        s.enabled = $("#pf-enabled").checked;
+        const min = Number($("#pf-mincost").value);
+        s.minCost = isNaN(min) || min < 0 ? 0 : min;
+        save();
+        resyncPortfolio();
+        toast("Portfolio updated");
+        return true;
+      },
     });
   }
 
@@ -1900,6 +2497,7 @@
         }
         db = incoming;
         save();
+        resyncPortfolio(); // keep the public feed in step with imported purchases
         done && done();
         route(currentTab);
         toast("Backup imported");
@@ -1923,6 +2521,8 @@
     contacts: renderContacts,
     purchases: renderPurchases,
     hours: renderHours,
+    clients: renderClients,
+    payments: renderPayments,
   };
 
   function route(tab) {
@@ -1941,6 +2541,8 @@
     if (currentTab === "contacts") openContactForm();
     else if (currentTab === "purchases") openPurchaseForm();
     else if (currentTab === "hours") openHoursForm();
+    else if (currentTab === "clients") openClientForm();
+    else if (currentTab === "payments") openPaymentForm();
   }
 
   /* ============================================================
@@ -1970,7 +2572,7 @@
         scheduleRender();
       })
     );
-    ["contacts", "purchases", "hours"].forEach((name) => {
+    ["contacts", "purchases", "hours", "clients", "payments"].forEach((name) => {
       unsubscribers.push(
         col(name).onSnapshot({ includeMetadataChanges: true }, (snap) => {
           db[name] = snap.docs.map((d) => d.data());

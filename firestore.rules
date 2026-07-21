@@ -14,5 +14,15 @@ service cloud.firestore {
     match /users/{userId}/{document=**} {
       allow read, write: if isKinsey() && request.auth.uid == userId;
     }
+
+    // Public "Finds" portfolio for the sourcing website. This is the ONLY
+    // publicly-readable data: a curated mirror containing just the photo,
+    // brand, item name and (optional) date of purchases Kinsey chooses to
+    // publish. No cost, client, receipt, or notes are ever written here.
+    // Anyone may read it (the website is public); only Kinsey may write.
+    match /portfolio/{id} {
+      allow read: if true;
+      allow write: if isKinsey();
+    }
   }
 }
