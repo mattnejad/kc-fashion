@@ -538,7 +538,7 @@ body {
   max-height: 92vh; overflow-y: auto; box-shadow: var(--shadow-lg);
   animation: slideup .24s cubic-bezier(.2,.8,.2,1);
 }
-@keyframes slideup { from { transform: translateY(30px); opacity: .6; } }
+@keyframes slideup { from { transform: translateY(30px); } }
 .modal-grip { width: 40px; height: 4px; background: var(--line); border-radius: 2px; margin: 6px auto 12px; }
 .modal h2 { font-family: var(--font-serif); font-weight: 400; font-size: 21px; margin: 0 0 16px; }
 
