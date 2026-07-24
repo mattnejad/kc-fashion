@@ -41,6 +41,9 @@
     // default; `enabled` is the master switch and `minCost` is a private filter
     // (never shown publicly — only decides which finds appear).
     portfolio: { enabled: true, minCost: 0 },
+    // Optional Google Sheets mirror (redundancy). `url` is an Apps Script web
+    // app bound to Kinsey's sheet; `token` authorises writes. Never public.
+    sheetsBackup: { enabled: false, url: "", token: "", lastSyncAt: 0, lastError: "" },
   });
 
   const defaultData = () => ({
@@ -1974,6 +1977,167 @@
   }
 
   /* ============================================================
+     GOOGLE SHEETS BACKUP
+     Mirrors the app's tabular data into a Google Sheet via an Apps Script
+     web app the user deploys on their own account (see tools/sheets-backup.gs).
+     Images are deliberately excluded — a Sheets cell caps at 50k characters.
+     Failures are non-fatal: this is redundancy, never the source of truth.
+     ============================================================ */
+  const sheetsCfg = () => Object.assign(
+    { enabled: false, url: "", token: "", lastSyncAt: 0, lastError: "" },
+    db.settings.sheetsBackup || {}
+  );
+
+  function buildSheetsPayload() {
+    const assoc = (id) => { const c = db.contacts.find((x) => x.id === id); return c ? c.name : ""; };
+    const yn = (v) => (v ? "Yes" : "");
+
+    return {
+      "Purchases": {
+        headers: ["Date", "Product", "Brand", "Store", "Sales associate", "Cost",
+          "Payment method", "Cashback %", "Reimbursed", "Reimbursed date", "Shipped",
+          "Photo", "Receipt", "Notes"],
+        rows: db.purchases.slice()
+          .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+          .map((p) => [p.date || "", p.product || "", p.brand || "", p.store || "",
+            assoc(p.contactId), Number(p.cost) || 0, p.paymentMethod || "",
+            Number(p.cashbackPercent) || 0, yn(p.reimbursed), p.reimbursedDate || "",
+            yn(p.shipped), yn(p.photo), yn(p.receipt), p.notes || ""]),
+      },
+      "Payments": {
+        headers: ["Date", "Amount", "From", "Allocated", "Unallocated", "Items", "Note"],
+        rows: db.payments.slice()
+          .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+          .map((p) => [p.date || "", Number(p.amount) || 0, clientName(p.clientId),
+            paymentAllocated(p), paymentUnallocated(p),
+            (p.allocations || []).map((a) => {
+              const pur = db.purchases.find((x) => x.id === a.purchaseId);
+              return pur ? pur.product : "(deleted)";
+            }).join(", "),
+            p.note || ""]),
+      },
+      "Hours": {
+        headers: ["Date", "Hours", "Reimbursed", "Reimbursed date", "Notes"],
+        rows: db.hours.slice()
+          .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+          .map((h) => [h.date || "", Number(h.hours) || 0, yn(h.reimbursed),
+            h.reimbursedDate || "", h.notes || ""]),
+      },
+      "Clients": {
+        headers: ["Name", "Status", "Phone", "Email", "Received to date", "Notes"],
+        rows: db.clients.slice()
+          .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+          .map((c) => [c.name || "", clientStatus(c) === "active" ? "Client" : "Potential",
+            c.phone || "", c.email || "", clientReceived(c), c.notes || ""]),
+      },
+      "Sales Associates": {
+        headers: ["Name", "Store", "Location", "Title", "Phone", "Email", "Notes"],
+        rows: db.contacts.slice()
+          .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+          .map((c) => [c.name || "", c.store || "", c.location || "", c.title || "",
+            c.phone || "", c.email || "", c.notes || ""]),
+      },
+      "Shipments": {
+        headers: ["Ship date", "Carrier", "Tracking number", "Status", "To", "Items", "Note"],
+        rows: db.shipments.slice()
+          .sort((a, b) => (a.shippedDate || "").localeCompare(b.shippedDate || ""))
+          .map((s) => [s.shippedDate || "", carrierById(s.carrier).name, s.trackingNumber || "",
+            shipStatusName(s.status), clientName(s.toClientId),
+            (s.items || []).map((id) => {
+              const pur = db.purchases.find((x) => x.id === id);
+              return pur ? pur.product : "(deleted)";
+            }).join(", "),
+            s.note || ""]),
+      },
+    };
+  }
+
+  // Posts as text/plain so the browser skips the CORS preflight Apps Script
+  // doesn't answer. Returns {ok, error}.
+  async function pushSheetsBackup({ silent = true } = {}) {
+    const cfg = sheetsCfg();
+    if (!cfg.url || !cfg.token) return { ok: false, error: "Not configured" };
+    try {
+      const res = await fetch(cfg.url, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ token: cfg.token, sheets: buildSheetsPayload() }),
+      });
+      const out = await res.json().catch(() => ({ ok: res.ok }));
+      if (!out.ok) throw new Error(out.error || "Sheet rejected the update");
+      db.settings.sheetsBackup = Object.assign(cfg, { lastSyncAt: Date.now(), lastError: "" });
+      save();
+      if (!silent) toast("Backed up to Google Sheets");
+      return { ok: true };
+    } catch (err) {
+      console.error("Sheets backup failed", err);
+      db.settings.sheetsBackup = Object.assign(cfg, { lastError: String(err.message || err) });
+      save();
+      if (!silent) toast("Backup failed — check the URL and token");
+      return { ok: false, error: String(err.message || err) };
+    }
+  }
+
+  let sheetsTimer = null;
+  function scheduleSheetsBackup() {
+    const cfg = sheetsCfg();
+    if (!cfg.enabled || !cfg.url || !cfg.token) return;
+    clearTimeout(sheetsTimer);
+    sheetsTimer = setTimeout(() => pushSheetsBackup({ silent: true }), 8000);
+  }
+
+  function openSheetsBackup() {
+    const cfg = sheetsCfg();
+    const token = cfg.token || uid() + uid();
+    const last = cfg.lastSyncAt
+      ? new Date(cfg.lastSyncAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })
+      : "Never";
+
+    openModal("Google Sheets backup", `
+      <p class="hint">Keeps a Google Sheet mirroring your data as a second copy.
+      Set it up once with the script in <code>tools/sheets-backup.gs</code>.</p>
+      <div class="check-field">
+        <input id="f-sb-enabled" type="checkbox" ${cfg.enabled ? "checked" : ""} />
+        <label for="f-sb-enabled">Back up automatically after changes</label>
+      </div>
+      <div class="field"><label>Token (paste into the script)</label>
+        <input id="f-sb-token" type="text" value="${esc(token)}" readonly /></div>
+      <div class="field"><label>Web app URL (from the script deployment)</label>
+        <input id="f-sb-url" type="url" value="${esc(cfg.url)}" placeholder="https://script.google.com/macros/s/…/exec" /></div>
+      <p class="hint">Last backup: <strong>${esc(last)}</strong>${cfg.lastError ? ` · <span style="color:var(--danger);">${esc(cfg.lastError)}</span>` : ""}</p>
+      <p class="hint warn">Photos and receipts aren't included — a spreadsheet cell
+      can't hold an image. Use Export backup (.json) for those.</p>
+      <div class="modal-actions" style="flex-direction:column; gap:10px; margin-top:6px;">
+        <button type="button" class="btn btn-ghost" id="sb-now">Back up now</button>
+      </div>
+    `, {
+      saveLabel: "Save",
+      onSave: () => {
+        const url = $("#f-sb-url").value.trim();
+        if (url && !/^https:\/\/script\.google\.com\//.test(url)) {
+          toast("That doesn't look like an Apps Script URL"); return false;
+        }
+        db.settings.sheetsBackup = Object.assign(sheetsCfg(), {
+          enabled: $("#f-sb-enabled").checked, url, token,
+        });
+        save();
+        toast("Backup settings saved");
+        return true;
+      },
+    });
+
+    $("#sb-now").addEventListener("click", async () => {
+      const url = $("#f-sb-url").value.trim();
+      if (!url) { toast("Add the Web app URL first"); return; }
+      db.settings.sheetsBackup = Object.assign(sheetsCfg(), { url, token });
+      save();
+      $("#sb-now").textContent = "Backing up…";
+      await pushSheetsBackup({ silent: false });
+      $("#sb-now").textContent = "Back up now";
+    });
+  }
+
+  /* ============================================================
      SHIPMENTS
      A shipment is one package covering one or more purchases. Items in a
      shipment are marked shipped and linked to it (same pattern as payments).
@@ -2364,6 +2528,7 @@
     const arr = db[coll];
     const i = arr.findIndex((x) => x.id === rec.id);
     if (i >= 0) arr[i] = rec; else arr.push(rec);
+    scheduleSheetsBackup();
     if (!userId) return;
     col(coll)
       .doc(rec.id)
@@ -2375,6 +2540,7 @@
   }
   function remove(coll, id) {
     db[coll] = db[coll].filter((x) => x.id !== id);
+    scheduleSheetsBackup();
     if (!userId) return;
     col(coll)
       .doc(id)
@@ -2681,6 +2847,7 @@
         <button type="button" class="btn btn-ghost" id="m-stores">Manage stores</button>
         <button type="button" class="btn btn-ghost" id="m-brands">Manage brands</button>
         <button type="button" class="btn btn-ghost" id="m-payments">Manage payment methods</button>
+        <button type="button" class="btn btn-ghost" id="m-sheets">Google Sheets backup</button>
         <button type="button" class="btn btn-primary" id="m-export">Export backup (.json)</button>
         <button type="button" class="btn btn-ghost" id="m-import">Import backup</button>
         <button type="button" class="btn btn-ghost" id="m-signout" style="color:var(--danger);">Sign out</button>
@@ -2702,6 +2869,7 @@
     const close = () => (root.innerHTML = "");
     $("#m-close", root).addEventListener("click", close);
     $("#m-portfolio", root).addEventListener("click", openPortfolioManager);
+    $("#m-sheets", root).addEventListener("click", openSheetsBackup);
     $("#m-stores", root).addEventListener("click", openStoreManager);
     $("#m-brands", root).addEventListener("click", openBrandManager);
     $("#m-payments", root).addEventListener("click", openPaymentManager);
