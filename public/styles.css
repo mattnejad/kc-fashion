@@ -243,6 +243,30 @@ body {
 .pick-list .pick-sub { display: block; font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
 .pick-list .pick-amt { font-weight: 600; white-space: nowrap; font-size: 14px; }
 
+/* Items / Shipments switcher */
+.view-switch {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px; margin-bottom: 14px;
+}
+.view-switch button {
+  border: 0; background: transparent; border-radius: 999px;
+  padding: 9px 0; font: inherit; font-size: 13.5px; font-weight: 600;
+  color: var(--ink-soft); cursor: pointer;
+}
+.view-switch button.active { background: var(--ink); color: #fff; }
+
+/* Tracking number block in the shipment detail view */
+.track-box {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface-2); padding: 12px 14px; margin-top: 4px;
+}
+.track-label {
+  font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: var(--ink-soft);
+  font-weight: 600; margin-bottom: 4px;
+}
+.track-num { font-size: 16px; font-weight: 600; word-break: break-all; }
+
 /* Payment allocation summary */
 .alloc-summary { margin: 12px 0 4px; }
 .alloc-line {

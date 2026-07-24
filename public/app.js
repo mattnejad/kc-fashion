@@ -49,6 +49,7 @@
     hours: [],
     clients: [],   // people/entities on the paying side (employer + clients)
     payments: [],  // money received, each allocated across outstanding items
+    shipments: [], // packages sent, each covering one or more purchases
     settings: defaultSettings(),
   });
 
@@ -216,7 +217,8 @@
   let currentTab = "dashboard";
   const ui = {
     contacts: { q: "", sort: "name" },
-    purchases: { filter: "outstanding", q: "", sort: "recent" },
+    purchases: { filter: "outstanding", q: "", sort: "recent", view: "items" },
+    shipments: { sort: "recent" },
     hours: { filter: "outstanding" },
     clients: { q: "", sort: "name", filter: "all" },
     payments: { sort: "recent" },
@@ -654,6 +656,7 @@
   }
 
   function renderPurchases() {
+    if (ui.purchases.view === "shipments") return renderShipments();
     const { filter, q, sort } = ui.purchases;
     const list = filterPurchases();
 
@@ -666,6 +669,7 @@
 
     viewEl.innerHTML = `
       <h2 class="view-title">Purchases</h2>
+      ${viewSwitcherHtml("items")}
       <div class="stat full" style="margin-bottom:10px;">
         <div class="stat-label">Currently awaiting reimbursement</div>
         <div class="stat-value amber">${money(owed)}</div>
@@ -711,7 +715,22 @@
     viewEl.querySelectorAll(".segment button").forEach((b) =>
       b.addEventListener("click", () => { ui.purchases.filter = b.dataset.f; renderPurchases(); })
     );
+    bindViewSwitcher();
     bindPurchaseCards();
+  }
+
+  // Items / Shipments switcher shown at the top of the Purchases tab.
+  function viewSwitcherHtml(active) {
+    return `
+      <div class="view-switch">
+        <button data-v="items" class="${active === "items" ? "active" : ""}">Items</button>
+        <button data-v="shipments" class="${active === "shipments" ? "active" : ""}">Shipments</button>
+      </div>`;
+  }
+  function bindViewSwitcher() {
+    viewEl.querySelectorAll(".view-switch button").forEach((b) =>
+      b.addEventListener("click", () => { ui.purchases.view = b.dataset.v; renderPurchases(); })
+    );
   }
 
   function purchaseCard(p) {
@@ -736,6 +755,7 @@
                 : `<span class="chip amber">Awaiting</span>`}
               ${p.paymentMethod ? `<span class="chip">${esc(p.paymentMethod)}</span>` : ""}
               ${cashbackAmt > 0 ? `<span class="chip green">+${money(cashbackAmt)} cashback</span>` : ""}
+              ${p.shipped ? `<span class="chip">&#128230; Shipped</span>` : ""}
             </div>
           </div>
           <div class="card-actions" style="flex-direction:column; align-items:flex-end;">
@@ -1954,6 +1974,276 @@
   }
 
   /* ============================================================
+     SHIPMENTS
+     A shipment is one package covering one or more purchases. Items in a
+     shipment are marked shipped and linked to it (same pattern as payments).
+     Tracking is stored per shipment; `events` is reserved for automatic
+     carrier updates if a tracking API is wired up later.
+     ============================================================ */
+  const CARRIERS = [
+    { id: "ups", name: "UPS", url: (t) => `https://www.ups.com/track?loc=en_US&tracknum=${encodeURIComponent(t)}` },
+    { id: "fedex", name: "FedEx", url: (t) => `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(t)}` },
+    { id: "usps", name: "USPS", url: (t) => `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(t)}` },
+    { id: "dhl", name: "DHL", url: (t) => `https://www.dhl.com/en/express/tracking.html?AWB=${encodeURIComponent(t)}` },
+    { id: "other", name: "Other", url: (t) => `https://www.google.com/search?q=${encodeURIComponent(t + " tracking")}` },
+  ];
+  const carrierById = (id) => CARRIERS.find((c) => c.id === id) || CARRIERS[CARRIERS.length - 1];
+  const trackingUrl = (s) => (s.trackingNumber ? carrierById(s.carrier).url(s.trackingNumber) : "");
+
+  const SHIP_STATUSES = [
+    { id: "ready", name: "Ready to ship" },
+    { id: "transit", name: "In transit" },
+    { id: "delivered", name: "Delivered" },
+    { id: "issue", name: "Problem" },
+  ];
+  const shipStatusName = (id) => (SHIP_STATUSES.find((s) => s.id === id) || SHIP_STATUSES[0]).name;
+  const shipStatusChip = (id) =>
+    id === "delivered" ? "green" : (id === "issue" ? "amber" : (id === "transit" ? "" : ""));
+
+  function renderShipments() {
+    const list = db.shipments.slice().sort((a, b) =>
+      (b.shippedDate || "").localeCompare(a.shippedDate || "") || (b.createdAt || 0) - (a.createdAt || 0));
+    const inTransit = db.shipments.filter((s) => s.status === "transit").length;
+
+    viewEl.innerHTML = `
+      <h2 class="view-title">Purchases</h2>
+      ${viewSwitcherHtml("shipments")}
+      <div class="stat-grid" style="margin-bottom:12px;">
+        <div class="stat">
+          <div class="stat-label">Shipments</div>
+          <div class="stat-value">${db.shipments.length}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">In transit</div>
+          <div class="stat-value ${inTransit ? "amber" : ""}">${inTransit}</div>
+        </div>
+      </div>
+      <div id="shipment-list">
+        ${list.length ? list.map(shipmentCard).join("")
+          : emptyState("&#128230;", "No shipments yet. Tap + to add one.")}
+      </div>`;
+    bindViewSwitcher();
+    bindShipmentCards();
+  }
+
+  function shipmentCard(s) {
+    const n = (s.items || []).length;
+    const url = trackingUrl(s);
+    return `
+      <div class="card card-clickable" data-id="${s.id}">
+        <div class="card-row">
+          <div class="card-main">
+            <div class="card-title">${esc(carrierById(s.carrier).name)}${s.trackingNumber ? ` · ${esc(s.trackingNumber)}` : ""}</div>
+            <div class="card-sub">${esc([fmtDate(s.shippedDate), `${n} item${n === 1 ? "" : "s"}`].filter(Boolean).join(" · "))}</div>
+            <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+              <span class="chip ${shipStatusChip(s.status)}">${esc(shipStatusName(s.status))}</span>
+              ${s.toClientId ? `<span class="chip">${esc(clientName(s.toClientId))}</span>` : ""}
+            </div>
+            ${s.note ? `<div class="card-notes">${esc(s.note)}</div>` : ""}
+            ${url ? `<div class="contact-links"><a class="link-btn" href="${esc(url)}" target="_blank" rel="noopener">Track package</a></div>` : ""}
+          </div>
+          <div class="card-actions"><button class="mini-btn" data-act="edit">Edit</button></div>
+        </div>
+      </div>`;
+  }
+
+  function bindShipmentCards() {
+    viewEl.querySelectorAll(".card[data-id]").forEach((card) => {
+      const s = db.shipments.find((x) => x.id === card.dataset.id);
+      if (!s) return;
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".mini-btn, .link-btn")) return;
+        openShipmentView(s);
+      });
+      card.querySelector('[data-act="edit"]')?.addEventListener("click", () => openShipmentForm(s));
+    });
+  }
+
+  function openShipmentForm(existing) {
+    const s = existing || {};
+    const chosen = new Set(s.items || []);
+
+    // Candidates: anything not already shipped, plus items already on THIS shipment.
+    const candidates = db.purchases
+      .filter((x) => !x.shipped || (existing && x.shipmentId === s.id))
+      .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+    const pickRows = candidates.map((x) => `
+      <label class="pick-row">
+        <input type="checkbox" data-paid="${x.reimbursed ? "1" : "0"}" value="${esc(x.id)}" ${chosen.has(x.id) ? "checked" : ""} />
+        <span class="pick-main">
+          <span class="pick-title">${esc(x.product)}</span>
+          <span class="pick-sub">${esc([fmtDate(x.date), x.brand || x.store].filter(Boolean).join(" · "))}${x.reimbursed ? "" : " · not reimbursed"}</span>
+        </span>
+        <span class="pick-amt">${money(x.cost)}</span>
+      </label>`).join("");
+
+    openModal(existing ? "Edit shipment" : "New shipment", `
+      <div class="field-row">
+        <div class="field"><label>Carrier</label>
+          <select id="f-scarrier">
+            ${CARRIERS.map((c) => `<option value="${c.id}" ${s.carrier === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
+          </select></div>
+        <div class="field"><label>Ship date</label>
+          <input id="f-sdate" type="date" value="${esc(s.shippedDate || todayISO())}" /></div>
+      </div>
+      <div class="field"><label>Tracking number</label>
+        <input id="f-stracking" type="text" inputmode="latin" value="${esc(s.trackingNumber || "")}" placeholder="e.g. 1Z999AA10123456784" /></div>
+      <div class="field-row">
+        <div class="field"><label>Status</label>
+          <select id="f-sstatus">
+            ${SHIP_STATUSES.map((st) => `<option value="${st.id}" ${(s.status || "ready") === st.id ? "selected" : ""}>${esc(st.name)}</option>`).join("")}
+          </select></div>
+        <div class="field"><label>To (optional)</label>
+          <select id="f-sclient">${clientSelectOptions(s.toClientId || "")}</select></div>
+      </div>
+      <div class="field"><label>Items in this shipment</label>
+        ${candidates.length
+          ? `<div class="pick-list">${pickRows}</div>`
+          : `<p class="hint">Everything's already in a shipment. Add a purchase first.</p>`}
+      </div>
+      <p class="hint warn" id="ship-warn" style="display:none;"></p>
+      <div class="field"><label>Note (optional)</label>
+        <textarea id="f-snote" placeholder="Contents, recipient address, anything to remember…">${esc(s.note || "")}</textarea></div>
+    `, {
+      saveLabel: existing ? "Save" : "Add shipment",
+      onSave: () => {
+        const items = [...document.querySelectorAll(".pick-row input:checked")].map((i) => i.value);
+        if (!items.length) { toast("Pick at least one item for this shipment"); return false; }
+        const rec = {
+          id: s.id || uid(),
+          carrier: $("#f-scarrier").value,
+          trackingNumber: $("#f-stracking").value.trim(),
+          shippedDate: $("#f-sdate").value || todayISO(),
+          status: $("#f-sstatus").value,
+          toClientId: $("#f-sclient").value || "",
+          note: $("#f-snote").value.trim(),
+          items,
+          events: s.events || [], // reserved for automatic carrier updates
+          createdAt: s.createdAt || Date.now(),
+        };
+        saveShipment(rec, existing ? s : null);
+        toast(existing ? "Shipment updated" : "Shipment added");
+        renderShipments();
+        return true;
+      },
+      onDelete: existing ? () => { deleteShipment(s); toast("Shipment deleted"); renderShipments(); } : null,
+    });
+
+    $("#f-sclient").addEventListener("change", (e) => handleClientSelectChange(e.target));
+    // Warn about items that haven't been reimbursed/paid yet.
+    const updateWarn = () => {
+      const unpaid = [...document.querySelectorAll(".pick-row input:checked")]
+        .filter((i) => i.dataset.paid === "0")
+        .map((i) => i.closest(".pick-row").querySelector(".pick-title").textContent);
+      const w = $("#ship-warn");
+      if (unpaid.length) {
+        w.textContent = `Heads up: ${unpaid.length} item${unpaid.length === 1 ? " hasn't" : "s haven't"} been reimbursed yet — ${unpaid.join(", ")}`;
+        w.style.display = "";
+      } else { w.style.display = "none"; }
+    };
+    document.querySelectorAll(".pick-row input").forEach((i) => i.addEventListener("change", updateWarn));
+    updateWarn();
+  }
+
+  function saveShipment(rec, prev) {
+    const nowIds = new Set(rec.items);
+    rec.items.forEach((id) => {
+      const pur = db.purchases.find((x) => x.id === id);
+      if (pur) { pur.shipped = true; pur.shipmentId = rec.id; upsert("purchases", pur); }
+    });
+    if (prev) {
+      (prev.items || []).forEach((id) => {
+        if (!nowIds.has(id)) {
+          const pur = db.purchases.find((x) => x.id === id);
+          if (pur && pur.shipmentId === rec.id) {
+            pur.shipped = false; pur.shipmentId = ""; upsert("purchases", pur);
+          }
+        }
+      });
+    }
+    upsert("shipments", rec);
+  }
+
+  function deleteShipment(s) {
+    (s.items || []).forEach((id) => {
+      const pur = db.purchases.find((x) => x.id === id);
+      if (pur && pur.shipmentId === s.id) {
+        pur.shipped = false; pur.shipmentId = ""; upsert("purchases", pur);
+      }
+    });
+    remove("shipments", s.id);
+  }
+
+  function openShipmentView(s) {
+    const url = trackingUrl(s);
+    const rows = (s.items || []).map((id) => {
+      const pur = db.purchases.find((x) => x.id === id);
+      const title = pur ? pur.product : "(deleted item)";
+      const sub = pur ? [fmtDate(pur.date), pur.brand || ""].filter(Boolean).join(" · ") : "";
+      const unpaid = pur && !pur.reimbursed;
+      return `
+        <div class="mini-row">
+          <div>
+            <div class="mini-row-title">${esc(title)}</div>
+            ${sub ? `<div class="mini-row-sub">${esc(sub)}</div>` : ""}
+          </div>
+          <div class="mini-row-right">
+            ${pur ? `<div class="amount">${money(pur.cost)}</div>` : ""}
+            ${unpaid ? `<span class="chip amber">Not reimbursed</span>` : ""}
+          </div>
+        </div>`;
+    }).join("") || `<p class="hint">No items on this shipment.</p>`;
+
+    const events = (s.events || []);
+    const eventsHtml = events.length ? `
+      <div class="section-label" style="margin:18px 2px 8px;">Tracking updates</div>
+      ${events.map((e) => `
+        <div class="mini-row">
+          <div>
+            <div class="mini-row-title">${esc(e.status || "")}</div>
+            <div class="mini-row-sub">${esc([e.date, e.location].filter(Boolean).join(" · "))}</div>
+          </div>
+        </div>`).join("")}` : "";
+
+    const root = $("#modal-root");
+    root.innerHTML = `
+      <div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-grip"></div>
+        <h2>${esc(carrierById(s.carrier).name)} shipment</h2>
+        <div class="card-sub" style="margin-bottom:10px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+          <span class="chip ${shipStatusChip(s.status)}">${esc(shipStatusName(s.status))}</span>
+          ${s.shippedDate ? `<span>Shipped ${esc(fmtDate(s.shippedDate))}</span>` : ""}
+          ${s.toClientId ? `<span class="chip">${esc(clientName(s.toClientId))}</span>` : ""}
+        </div>
+        ${s.trackingNumber ? `<div class="track-box">
+          <div class="track-label">Tracking number</div>
+          <div class="track-num">${esc(s.trackingNumber)}</div>
+          <div class="contact-links" style="margin-top:10px;">
+            <a class="link-btn" href="${esc(url)}" target="_blank" rel="noopener">Track package</a>
+            <button type="button" class="link-btn" id="copy-track">Copy number</button>
+          </div>
+        </div>` : `<p class="hint">No tracking number on this shipment.</p>`}
+        ${s.note ? `<div class="card-notes" style="margin:12px 0;">${esc(s.note)}</div>` : ""}
+        <div class="section-label" style="margin:18px 2px 8px;">Items</div>
+        ${rows}
+        ${eventsHtml}
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="view-close">Close</button>
+          <button type="button" class="btn btn-primary" id="view-edit">Edit</button>
+        </div>
+      </div></div>`;
+    const close = () => (root.innerHTML = "");
+    $(".modal-backdrop", root).addEventListener("click", (e) => { if (e.target.classList.contains("modal-backdrop")) close(); });
+    $("#view-close", root).addEventListener("click", close);
+    $("#view-edit", root).addEventListener("click", () => { close(); openShipmentForm(s); });
+    $("#copy-track", root)?.addEventListener("click", () => {
+      navigator.clipboard?.writeText(s.trackingNumber).then(() => toast("Tracking number copied"),
+        () => toast("Couldn't copy"));
+    });
+  }
+
+  /* ============================================================
      HOURS
      ============================================================ */
   function renderHours() {
@@ -2539,7 +2829,9 @@
 
   function fabAction() {
     if (currentTab === "contacts") openContactForm();
-    else if (currentTab === "purchases") openPurchaseForm();
+    else if (currentTab === "purchases") {
+      if (ui.purchases.view === "shipments") openShipmentForm(); else openPurchaseForm();
+    }
     else if (currentTab === "hours") openHoursForm();
     else if (currentTab === "clients") openClientForm();
     else if (currentTab === "payments") openPaymentForm();
@@ -2572,7 +2864,7 @@
         scheduleRender();
       })
     );
-    ["contacts", "purchases", "hours", "clients", "payments"].forEach((name) => {
+    ["contacts", "purchases", "hours", "clients", "payments", "shipments"].forEach((name) => {
       unsubscribers.push(
         col(name).onSnapshot({ includeMetadataChanges: true }, (snap) => {
           db[name] = snap.docs.map((d) => d.data());
