@@ -2079,6 +2079,7 @@
   }
 
   let sheetsTimer = null;
+  let clockTimer = null;
   function scheduleSheetsBackup() {
     const cfg = sheetsCfg();
     if (!cfg.enabled || !cfg.url || !cfg.token) return;
@@ -2420,6 +2421,7 @@
 
     viewEl.innerHTML = `
       <h2 class="view-title">Hours</h2>
+      ${clockCardHtml()}
       <div class="stat full" style="margin-bottom:14px;">
         <div class="stat-label">Hours awaiting reimbursement</div>
         <div class="stat-value amber">${owedHours.toLocaleString()}</div>
@@ -2438,7 +2440,94 @@
     viewEl.querySelectorAll(".segment button").forEach((b) =>
       b.addEventListener("click", () => { ui.hours.filter = b.dataset.f; renderHours(); })
     );
+    bindClockCard();
     bindHoursCards();
+  }
+
+  /* ---------- Timesheet: clock in / clock out ---------- */
+  // The active session lives in settings so it syncs — clock in on the phone,
+  // clock out on a laptop. Cleared once an hours entry is created.
+  const activeClock = () => db.settings.activeClock || null;
+
+  function fmtElapsed(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  }
+  const clockTime = (ms) => new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+
+  function clockCardHtml() {
+    const c = activeClock();
+    if (c && c.startedAt) {
+      return `
+        <div class="clock-card running">
+          <div class="clock-live">
+            <div class="clock-elapsed" id="clock-elapsed">${fmtElapsed(Date.now() - c.startedAt)}</div>
+            <div class="clock-since">Clocked in at ${esc(clockTime(c.startedAt))}</div>
+          </div>
+          <div class="field" style="margin:10px 0 12px;">
+            <input id="clock-note" type="text" placeholder="What are you working on? (optional)" value="${esc(c.note || "")}" />
+          </div>
+          <div class="clock-actions">
+            <button type="button" class="btn btn-ghost" id="clock-cancel">Cancel</button>
+            <button type="button" class="btn btn-primary" id="clock-out">Clock out</button>
+          </div>
+        </div>`;
+    }
+    return `
+      <div class="clock-card">
+        <button type="button" class="btn btn-primary clock-in-btn" id="clock-in">&#9200; Clock in</button>
+        <p class="hint" style="margin:8px 2px 0; text-align:center;">Or tap + to add or edit hours by hand.</p>
+      </div>`;
+  }
+
+  function bindClockCard() {
+    clearInterval(clockTimer);
+    const c = activeClock();
+    if (c && c.startedAt) {
+      const tick = () => {
+        const el = $("#clock-elapsed");
+        if (!el) { clearInterval(clockTimer); return; } // left the tab
+        el.textContent = fmtElapsed(Date.now() - c.startedAt);
+      };
+      clockTimer = setInterval(tick, 1000);
+      // Persist a note edit without disrupting the timer.
+      $("#clock-note")?.addEventListener("input", (e) => {
+        db.settings.activeClock = Object.assign({}, activeClock(), { note: e.target.value });
+      });
+      $("#clock-out")?.addEventListener("click", clockOut);
+      $("#clock-cancel")?.addEventListener("click", () => {
+        if (!confirm("Discard this session without saving?")) return;
+        db.settings.activeClock = null; save(); renderHours();
+      });
+    } else {
+      $("#clock-in")?.addEventListener("click", clockIn);
+    }
+  }
+
+  function clockIn() {
+    db.settings.activeClock = { startedAt: Date.now(), note: "" };
+    save();
+    renderHours();
+  }
+
+  function clockOut() {
+    const c = activeClock();
+    if (!c || !c.startedAt) return;
+    const hrs = Math.round(((Date.now() - c.startedAt) / 3600000) * 100) / 100;
+    const started = new Date(c.startedAt);
+    const dateISO = new Date(c.startedAt - started.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const span = `${clockTime(c.startedAt)}–${clockTime(Date.now())}`;
+    const note = (c.note ? c.note.trim() + " · " : "") + span;
+    upsert("hours", {
+      id: uid(), hours: hrs, date: dateISO, notes: note,
+      reimbursed: false, reimbursedDate: "", createdAt: Date.now(),
+    });
+    db.settings.activeClock = null;
+    save();
+    clearInterval(clockTimer);
+    toast(`Logged ${hrs} hrs`);
+    renderHours();
   }
 
   function hoursCard(h) {

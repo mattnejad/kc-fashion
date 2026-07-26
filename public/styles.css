@@ -243,6 +243,26 @@ body {
 .pick-list .pick-sub { display: block; font-size: 12.5px; color: var(--ink-soft); margin-top: 2px; }
 .pick-list .pick-amt { font-weight: 600; white-space: nowrap; font-size: 14px; }
 
+/* Timesheet clock in / out */
+.clock-card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 16px; margin-bottom: 14px;
+}
+.clock-card.running { border-color: var(--gold); background: var(--gold-soft); }
+.clock-in-btn { width: 100%; font-size: 16px; padding: 15px 0; }
+.clock-live { text-align: center; }
+.clock-elapsed {
+  font-family: var(--font-serif); font-size: 40px; font-weight: 400;
+  letter-spacing: 1px; font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.clock-since { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.clock-card.running .field input {
+  background: #fff; text-align: center;
+}
+.clock-actions { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; }
+.clock-actions .btn { padding: 13px 0; }
+
 /* Items / Shipments switcher */
 .view-switch {
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
