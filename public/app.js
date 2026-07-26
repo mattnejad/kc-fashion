@@ -2939,9 +2939,11 @@
         <button type="button" class="btn btn-ghost" id="m-sheets">Google Sheets backup</button>
         <button type="button" class="btn btn-primary" id="m-export">Export backup (.json)</button>
         <button type="button" class="btn btn-ghost" id="m-import">Import backup</button>
+        <button type="button" class="btn btn-ghost" id="m-import-sheet">Import spreadsheet data</button>
         <button type="button" class="btn btn-ghost" id="m-signout" style="color:var(--danger);">Sign out</button>
       </div>
       <input id="m-file" type="file" accept="application/json,.json" hidden />
+      <input id="m-sheet-file" type="file" accept="application/json,.json" hidden />
       <p class="hint" style="margin-top:16px;">
         ${db.contacts.length} sales associates · ${db.purchases.length} purchases · ${db.hours.length} hours entries
       </p>
@@ -2965,6 +2967,8 @@
     $("#m-export", root).addEventListener("click", exportData);
     $("#m-import", root).addEventListener("click", () => $("#m-file", root).click());
     $("#m-file", root).addEventListener("change", (e) => importData(e.target.files[0], close));
+    $("#m-import-sheet", root).addEventListener("click", () => $("#m-sheet-file", root).click());
+    $("#m-sheet-file", root).addEventListener("change", (e) => importSpreadsheet(e.target.files[0], close));
     $("#m-signout", root).addEventListener("click", () => {
       if (confirm("Sign out? Your data stays safely in your account.")) {
         close();
@@ -3048,6 +3052,47 @@
         done && done();
         route(currentTab);
         toast("Backup imported");
+      } catch (err) {
+        toast("Couldn't import that file");
+        console.error(err);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // Merge importer for the converted Google Sheets export. ADDS records to
+  // whatever already exists — never deletes — so it's safe to run anytime.
+  // Re-running the same file is idempotent (records keep their ids).
+  function importSpreadsheet(file, done) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const cols = ["contacts", "purchases", "hours"];
+        if (!cols.some((c) => Array.isArray(parsed[c])))
+          throw new Error("Not a spreadsheet-import file");
+        const counts = cols.map((c) => (parsed[c] || []).length);
+        const label = `${counts[1]} purchases, ${counts[0]} sales associates, ${counts[2]} hours entries`;
+        if (!confirm(`Add ${label}?\n\nThis ADDS to your current data — nothing is deleted. Running it again won't create duplicates.`))
+          return;
+        toast("Importing…");
+        for (const name of cols) {
+          const recs = parsed[name] || [];
+          recs.forEach((r) => {
+            const i = db[name].findIndex((x) => x.id === r.id);
+            if (i >= 0) db[name][i] = r; else db[name].push(r);
+          });
+          if (userId) {
+            await Promise.all(recs.map((r) =>
+              col(name).doc(r.id).set(JSON.parse(JSON.stringify(r)))));
+          }
+        }
+        resyncPortfolio();
+        scheduleSheetsBackup();
+        done && done();
+        route(currentTab);
+        toast(`Imported ${label}`);
       } catch (err) {
         toast("Couldn't import that file");
         console.error(err);
